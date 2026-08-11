@@ -1,0 +1,244 @@
+"""
+Camada de dados do app CRAS.
+Usa SQLite (arquivo local cras.db) como substituto das abas
+"Ficha" e "Base" / "Base 2025 - 2026" da planilha original.
+"""
+import sqlite3
+import json
+from pathlib import Path
+from datetime import date, datetime
+
+DB_PATH = Path(__file__).parent / "cras.db"
+MEDICOS_SEED = Path(__file__).parent / "data" / "medicos.json"
+BASE_HISTORICO_SEED = Path(__file__).parent / "data" / "base_historico.json"
+
+NOMES_MES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
+             "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
+NOMES_DIA = ["Segunda-feira", "Terca-feira", "Quarta-feira", "Quinta-feira",
+             "Sexta-feira", "Sabado", "Domingo"]  # Python weekday(): 0=segunda
+
+
+def nome_mes(d: date) -> str:
+    return NOMES_MES[d.month - 1]
+
+
+def nome_dia(d: date) -> str:
+    return NOMES_DIA[d.weekday()]
+
+
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS medicos (
+            id INTEGER PRIMARY KEY,
+            nome TEXT UNIQUE NOT NULL,
+            especialidade TEXT,
+            cod TEXT,
+            meta INTEGER
+        )
+    """)
+
+    # Ficha: um registro por atendimento (equivalente à aba "Ficha")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ficha (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nr_cras TEXT,
+            data TEXT NOT NULL,
+            mes TEXT,
+            dia_semana TEXT,
+            turno TEXT,
+            ordem INTEGER,
+            medico TEXT,
+            especialidade TEXT,
+            matricula TEXT,
+            nome_usuario TEXT,
+            assistido TEXT,
+            servidor TEXT,
+            realizado TEXT,
+            consulta TEXT,
+            falta_profissional TEXT,
+            criado_em TEXT
+        )
+    """)
+
+    # Base: um registro por (data, médico) - equivalente às abas "Base" / "Base 2025 - 2026"
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS base (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data TEXT NOT NULL,
+            mes TEXT,
+            dia_semana TEXT,
+            medico TEXT,
+            especialidade TEXT,
+            cod_medico TEXT,
+            discentes_assistidos INTEGER DEFAULT 0,
+            discentes_naoassistidos INTEGER DEFAULT 0,
+            atendidos_servidores INTEGER DEFAULT 0,
+            faltosos INTEGER DEFAULT 0,
+            falta_profissional INTEGER DEFAULT 0,
+            agendados INTEGER,
+            total_atendidos INTEGER DEFAULT 0,
+            meta INTEGER,
+            absenteismo REAL,
+            ocupacao REAL,
+            classif_absenteismo TEXT,
+            classif_ocupacao TEXT,
+            classif_desempenho TEXT,
+            UNIQUE(data, medico)
+        )
+    """)
+
+    conn.commit()
+
+    # Semeia médicos se a tabela estiver vazia
+    cur.execute("SELECT COUNT(*) FROM medicos")
+    if cur.fetchone()[0] == 0 and MEDICOS_SEED.exists():
+        medicos = json.loads(MEDICOS_SEED.read_text(encoding="utf-8"))
+        cur.executemany(
+            "INSERT INTO medicos (id, nome, especialidade, cod, meta) VALUES (?,?,?,?,?)",
+            [(m["id"], m["nome"], m["especialidade"], m["cod"], m["meta"]) for m in medicos]
+        )
+        conn.commit()
+
+    # Semeia o histórico real (aba "Base 2025 - 2026" do arquivo original)
+    # se a tabela 'base' ainda estiver vazia
+    cur.execute("SELECT COUNT(*) FROM base")
+    if cur.fetchone()[0] == 0 and BASE_HISTORICO_SEED.exists():
+        registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
+        cur.executemany("""
+            INSERT OR IGNORE INTO base
+                (data, mes, dia_semana, medico, especialidade, cod_medico,
+                 discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
+                 faltosos, falta_profissional, agendados, total_atendidos, meta,
+                 absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, [
+            (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
+             r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
+             r["faltosos"], r["falta_profissional"], r["agendados"], r["total_atendidos"], r["meta"],
+             r["absenteismo"], r["ocupacao"], r["classif_absenteismo"], r["classif_ocupacao"],
+             r["classif_desempenho"])
+            for r in registros
+        ])
+        conn.commit()
+
+    conn.close()
+
+
+def listar_medicos():
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM medicos ORDER BY nome").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def buscar_medico(nome: str):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM medicos WHERE nome = ?", (nome,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
+                        nr_matricula, categoria):
+    """
+    categoria: 'servidor' | 'assistido' | 'discente'
+    Equivale à macro SalvarNaBase do arquivo original.
+    """
+    med = buscar_medico(medico)
+    especialidade = med["especialidade"] if med else ""
+    cod_medico = med["cod"] if med else ""
+
+    assistido = "Sim" if categoria == "assistido" else "Não"
+    servidor = "Sim" if categoria == "servidor" else "Não"
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Ordem: quantos atendimentos esse usuário já teve (equivalente à fórmula COUNTIFS da coluna F)
+    ordem = cur.execute(
+        "SELECT COUNT(*) FROM ficha WHERE nome_usuario = ?", (usuario,)
+    ).fetchone()[0] + 1
+
+    cur.execute("""
+        INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
+                            especialidade, matricula, nome_usuario, assistido, servidor,
+                            criado_em)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (nr_cras, data_atendimento.isoformat(), nome_mes(data_atendimento),
+          nome_dia(data_atendimento), turno, ordem, medico, especialidade,
+          nr_matricula, usuario, assistido, servidor,
+          datetime.now().isoformat(timespec="seconds")))
+
+    # Base: um registro agregado por (data, médico). Diferente do VBA original
+    # (que só criava a linha e não voltava a atualizá-la), aqui a linha é
+    # criada na primeira vez e os contadores são incrementados nos lançamentos
+    # seguintes do mesmo dia/médico — assim o resumo diário fica sempre correto.
+    meta = med["meta"] if med else None
+    existente = cur.execute(
+        "SELECT id FROM base WHERE data = ? AND medico = ?",
+        (data_atendimento.isoformat(), medico)
+    ).fetchone()
+
+    if existente is None:
+        cur.execute("""
+            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                               discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
+                               total_atendidos, meta)
+            VALUES (?,?,?,?,?,?,?,?,?,1,?)
+        """, (data_atendimento.isoformat(), nome_mes(data_atendimento),
+              nome_dia(data_atendimento), medico, especialidade, cod_medico,
+              1 if categoria == "assistido" else 0,
+              1 if categoria == "discente" else 0,
+              1 if categoria == "servidor" else 0,
+              meta))
+    else:
+        campo = {"assistido": "discentes_assistidos",
+                 "discente": "discentes_naoassistidos",
+                 "servidor": "atendidos_servidores"}[categoria]
+        cur.execute(f"""
+            UPDATE base SET {campo} = {campo} + 1, total_atendidos = total_atendidos + 1
+            WHERE id = ?
+        """, (existente["id"],))
+
+    conn.commit()
+    conn.close()
+
+
+def get_ficha_df():
+    import pandas as pd
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM ficha ORDER BY data, id", conn)
+    conn.close()
+    return df
+
+
+def get_base_df():
+    import pandas as pd
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM base ORDER BY data", conn)
+    conn.close()
+    return df
+
+
+def get_mapa_atendimento(medico: str, data_sel: date, turno: str | None):
+    """Retorna a lista de atendimentos de um médico numa data (e turno opcional),
+    equivalente à macro GerarMapaPDF."""
+    conn = get_conn()
+    q = "SELECT * FROM ficha WHERE medico = ? AND data = ?"
+    params = [medico, data_sel.isoformat()]
+    if turno:
+        q += " AND turno = ?"
+        params.append(turno)
+    q += " ORDER BY id"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
