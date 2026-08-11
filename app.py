@@ -6,10 +6,13 @@ import db
 from pdf_mapa import gerar_pdf_mapa
 
 st.set_page_config(page_title="CRAS - Sistema de Atendimento", page_icon="🏥", layout="wide")
-avisos_init = db.init_db()
-if avisos_init:
+resultado_init = db.init_db()
+if resultado_init["erros"]:
     with st.sidebar:
-        st.error("⚠️ Problemas ao carregar os dados iniciais — veja 'Base de Dados > Diagnóstico'.")
+        st.error("⚠️ Problemas ao carregar os dados — veja 'Base de Dados > Diagnóstico'.")
+elif resultado_init["info"]:
+    with st.sidebar:
+        st.info("ℹ️ Alguns dados foram completados automaticamente — veja 'Base de Dados > Diagnóstico'.")
 
 st.sidebar.title("🏥 CRAS")
 pagina = st.sidebar.radio(
@@ -205,11 +208,14 @@ elif pagina == "📁 Base de Dados":
         st.dataframe(df, use_container_width=True, hide_index=True)
 
     with aba[3]:
-        st.caption("Use esta aba se os gráficos do Dashboard aparecerem vazios.")
-        if avisos_init:
-            for a in avisos_init:
-                st.error(a)
-        else:
+        st.caption("Use esta aba se os gráficos ou a lista de médicos aparecerem vazios.")
+        if resultado_init["erros"]:
+            for e in resultado_init["erros"]:
+                st.error(e)
+        if resultado_init["info"]:
+            for i in resultado_init["info"]:
+                st.info(i)
+        if not resultado_init["erros"] and not resultado_init["info"]:
             st.success("Nenhum problema encontrado na inicialização.")
 
         st.write("**Caminhos verificados:**")

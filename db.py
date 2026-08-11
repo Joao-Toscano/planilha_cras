@@ -37,6 +37,7 @@ def init_db():
     cur = conn.cursor()
 
     avisos = []
+    erros = []
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS medicos (
@@ -126,46 +127,57 @@ def init_db():
                            f"anterior) — adicionada automaticamente.")
     conn.commit()
 
-    # Semeia médicos se a tabela estiver vazia
-    cur.execute("SELECT COUNT(*) FROM medicos")
-    if cur.fetchone()[0] == 0:
-        if MEDICOS_SEED.exists():
-            medicos = json.loads(MEDICOS_SEED.read_text(encoding="utf-8"))
-            cur.executemany(
-                "INSERT INTO medicos (id, nome, especialidade, cod, meta) VALUES (?,?,?,?,?)",
-                [(m["id"], m["nome"], m["especialidade"], m["cod"], m["meta"]) for m in medicos]
-            )
-            conn.commit()
-        else:
-            avisos.append(f"Arquivo de médicos não encontrado em: {MEDICOS_SEED}")
+    # Sincroniza médicos: roda sempre (não só na primeira vez), usando
+    # INSERT OR IGNORE, para preencher automaticamente qualquer médico que
+    # esteja faltando — inclusive se o banco já existia de uma versão
+    # anterior com uma lista incompleta. Não duplica quem já existe.
+    if MEDICOS_SEED.exists():
+        medicos = json.loads(MEDICOS_SEED.read_text(encoding="utf-8"))
+        antes = cur.execute("SELECT COUNT(*) FROM medicos").fetchone()[0]
+        cur.executemany(
+            "INSERT OR IGNORE INTO medicos (id, nome, especialidade, cod, meta) VALUES (?,?,?,?,?)",
+            [(m["id"], m["nome"], m["especialidade"], m["cod"], m["meta"]) for m in medicos]
+        )
+        conn.commit()
+        depois = cur.execute("SELECT COUNT(*) FROM medicos").fetchone()[0]
+        if depois > antes:
+            avisos.append(f"{depois - antes} médico(s) que estavam faltando no banco foram "
+                           f"adicionados automaticamente (total agora: {depois}).")
+    else:
+        erros.append(f"Arquivo de médicos não encontrado em: {MEDICOS_SEED}")
 
-    # Semeia o histórico real (aba "Base 2025 - 2026" do arquivo original)
-    # se a tabela 'base' ainda estiver vazia
-    cur.execute("SELECT COUNT(*) FROM base")
-    if cur.fetchone()[0] == 0:
-        if BASE_HISTORICO_SEED.exists():
-            registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
-            cur.executemany("""
-                INSERT OR IGNORE INTO base
-                    (data, mes, dia_semana, medico, especialidade, cod_medico,
-                     discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
-                     faltosos, falta_profissional, agendados, total_atendidos, meta,
-                     absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, [
-                (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
-                 r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
-                 r["faltosos"], r["falta_profissional"], r["agendados"], r["total_atendidos"], r["meta"],
-                 r["absenteismo"], r["ocupacao"], r["classif_absenteismo"], r["classif_ocupacao"],
-                 r["classif_desempenho"])
-                for r in registros
-            ])
-            conn.commit()
-        else:
-            avisos.append(f"Arquivo de histórico não encontrado em: {BASE_HISTORICO_SEED}")
+    # Sincroniza o histórico da mesma forma: roda sempre, usando INSERT OR
+    # IGNORE (a restrição UNIQUE(data, medico) evita duplicar registros já
+    # existentes) — preenche automaticamente qualquer linha do histórico que
+    # ainda esteja faltando.
+    if BASE_HISTORICO_SEED.exists():
+        registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
+        antes = cur.execute("SELECT COUNT(*) FROM base").fetchone()[0]
+        cur.executemany("""
+            INSERT OR IGNORE INTO base
+                (data, mes, dia_semana, medico, especialidade, cod_medico,
+                 discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
+                 faltosos, falta_profissional, agendados, total_atendidos, meta,
+                 absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, [
+            (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
+             r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
+             r["faltosos"], r["falta_profissional"], r["agendados"], r["total_atendidos"], r["meta"],
+             r["absenteismo"], r["ocupacao"], r["classif_absenteismo"], r["classif_ocupacao"],
+             r["classif_desempenho"])
+            for r in registros
+        ])
+        conn.commit()
+        depois = cur.execute("SELECT COUNT(*) FROM base").fetchone()[0]
+        if depois > antes:
+            avisos.append(f"{depois - antes} registro(s) do histórico que estavam faltando foram "
+                           f"adicionados automaticamente (total agora: {depois}).")
+    else:
+        erros.append(f"Arquivo de histórico não encontrado em: {BASE_HISTORICO_SEED}")
 
     conn.close()
-    return avisos
+    return {"info": avisos, "erros": erros}
 
 
 def listar_medicos():
