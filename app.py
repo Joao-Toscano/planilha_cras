@@ -65,62 +65,59 @@ if pagina == "📝 Lançamento Diário":
             st.success("Registro salvo com sucesso!")
 
     st.divider()
+
+    # -----------------------------------------------------------------
+    # Atendimentos do dia — revisar e marcar status (Realizado / Falta)
+    # -----------------------------------------------------------------
+    st.subheader("📋 Atendimentos do dia")
+    st.caption("Marque abaixo se cada atendimento aconteceu ou não, e o motivo — "
+               "só os marcados como 'Realizado' entram no Mapa de Atendimento.")
+
+    colr1, colr2 = st.columns(2)
+    with colr1:
+        data_revisao = st.date_input("Dia a revisar", value=date.today(),
+                                      format="DD/MM/YYYY", key="data_revisao")
+    with colr2:
+        medico_revisao = st.selectbox("Filtrar por médico (opcional)", ["Todos"] + nomes_medicos,
+                                       key="medico_revisao")
+
+    registros = db.get_atendimentos_do_dia(
+        data_revisao, None if medico_revisao == "Todos" else medico_revisao
+    )
+
+    if not registros:
+        st.info("Nenhum atendimento lançado para esse dia.")
+    else:
+        df_rev = pd.DataFrame(registros).set_index("id")
+        df_rev_exibir = df_rev[["medico", "turno", "nome_usuario", "matricula", "status"]].copy()
+        df_rev_exibir.columns = ["Médico", "Turno", "Nome do usuário", "Matrícula", "Status"]
+
+        editado = st.data_editor(
+            df_rev_exibir,
+            column_config={
+                "Status": st.column_config.SelectboxColumn(
+                    "Status", options=db.STATUS_OPCOES, required=True
+                ),
+            },
+            disabled=["Médico", "Turno", "Nome do usuário", "Matrícula"],
+            use_container_width=True,
+            key="editor_atendimentos_dia",
+        )
+
+        if st.button("💾 Salvar alterações de status"):
+            mudou = 0
+            for ficha_id, linha in editado.iterrows():
+                status_original = df_rev_exibir.loc[ficha_id, "Status"]
+                if linha["Status"] != status_original:
+                    db.atualizar_status_atendimento(int(ficha_id), linha["Status"])
+                    mudou += 1
+            if mudou:
+                st.success(f"{mudou} atendimento(s) atualizado(s).")
+                st.rerun()
+            else:
+                st.info("Nenhuma alteração para salvar.")
+
     st.caption(f"Última atualização: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}")
-
-    # -----------------------------------------------------------------
-    # Registrar falta do profissional (sem nenhum atendimento no dia)
-    # -----------------------------------------------------------------
-    with st.expander("🚫 Registrar falta do profissional (dia sem nenhum atendimento)"):
-        st.caption("Use aqui quando o profissional não compareceu — sem preencher um "
-                   "atendimento por paciente.")
-        with st.form("form_falta", clear_on_submit=True):
-            colf1, colf2, colf3 = st.columns(3)
-            with colf1:
-                medico_falta = st.selectbox("Médico", nomes_medicos, index=None,
-                                             placeholder="Selecione o médico", key="medico_falta")
-            with colf2:
-                data_falta = st.date_input("Data", value=date.today(), format="DD/MM/YYYY", key="data_falta")
-            with colf3:
-                turno_falta = st.selectbox("Turno", ["MANHÃ", "TARDE"], key="turno_falta")
-            motivo_falta = st.radio("Motivo", ["Ausência", "Férias/Feriado"], horizontal=True)
-            enviar_falta = st.form_submit_button("Registrar falta")
-
-        if enviar_falta:
-            if not medico_falta:
-                st.error("Selecione o médico.")
-            else:
-                db.registrar_falta_profissional(medico_falta, data_falta, turno_falta, motivo_falta)
-                st.success(f"Falta registrada: {medico_falta} — {data_falta.strftime('%d/%m/%Y')} ({motivo_falta}).")
-
-    # -----------------------------------------------------------------
-    # Verificação: houve ou não atendimento nesse dia/médico?
-    # -----------------------------------------------------------------
-    with st.expander("🔍 Verificar se houve atendimento num dia"):
-        colv1, colv2, colv3 = st.columns(3)
-        with colv1:
-            medico_verif = st.selectbox("Médico", nomes_medicos, index=None,
-                                         placeholder="Selecione o médico", key="medico_verif")
-        with colv2:
-            data_verif = st.date_input("Data", value=date.today(), format="DD/MM/YYYY", key="data_verif")
-        with colv3:
-            turno_verif = st.selectbox("Turno", ["Ambos", "MANHÃ", "TARDE"], key="turno_verif")
-
-        if medico_verif:
-            turno_filtro = None if turno_verif == "Ambos" else turno_verif
-            resultado = db.get_verificacao_atendimento(medico_verif, data_verif, turno_filtro)
-
-            if resultado["status"] == "sem_registro":
-                st.warning("Nenhum registro encontrado — não foi lançado atendimento nem falta "
-                          "para esse dia/médico/turno.")
-            elif resultado["status"] == "faltou":
-                motivos = ", ".join(sorted({f["falta_profissional"] for f in resultado["faltas"]}))
-                st.error(f"❌ Não houve atendimento — profissional ausente ({motivos}).")
-            else:
-                st.success(f"✅ Houve atendimento — {len(resultado['atendimentos'])} paciente(s) "
-                          f"atendido(s) nesse dia/turno.")
-                df_v = pd.DataFrame(resultado["atendimentos"])[["nome_usuario", "matricula", "turno"]]
-                df_v.columns = ["Nome do usuário", "Matrícula", "Turno"]
-                st.dataframe(df_v, use_container_width=True, hide_index=True)
 
 # =====================================================================
 # PÁGINA 2 — Mapa de Atendimento (equivalente à aba "Mapa Impressao")
@@ -163,30 +160,33 @@ elif pagina == "🖨️ Mapa de Atendimento":
         st.subheader(f"{medico_sel} — {especialidade}")
         st.write(f"**Data:** {data_sel.strftime('%d/%m/%Y')} · **Turno:** {turno_sel}")
 
-        faltas = [a for a in atendimentos if a.get("falta_profissional") != "Presença"]
-        atendimentos_reais = [a for a in atendimentos if a.get("falta_profissional") == "Presença"]
+        turno_filtro_faltas = None if turno_sel == "Ambos" else turno_sel
+        n_faltas = db.contar_nao_realizados(medico_sel, data_sel, turno_filtro_faltas)
 
-        if faltas and not atendimentos_reais:
-            motivos = ", ".join(sorted({f["falta_profissional"] for f in faltas}))
-            st.error(f"❌ Profissional ausente nesse dia/turno ({motivos}) — nenhum atendimento realizado.")
-        elif not atendimentos and not faltas:
-            st.warning("Nenhum registro encontrado — sem atendimento nem falta lançados para esse filtro.")
-
-        if atendimentos_reais:
-            df = pd.DataFrame(atendimentos_reais)[
+        if not atendimentos and n_faltas:
+            st.error(f"❌ Nenhum atendimento realizado nesse dia/turno — {n_faltas} falta(s) registrada(s).")
+        elif not atendimentos:
+            st.warning("Nenhum registro encontrado para esse filtro. Lance atendimentos na página "
+                      "'Lançamento Diário'.")
+        else:
+            df = pd.DataFrame(atendimentos)[
                 ["nr_cras", "nome_usuario", "matricula", "assistido", "servidor"]
             ]
             df.columns = ["Nº CRAS", "Nome do usuário", "Matrícula", "Assistido", "Servidor"]
             st.dataframe(df, use_container_width=True, hide_index=True)
+            if n_faltas:
+                st.caption(f"ℹ️ {n_faltas} atendimento(s) desse dia/turno não entraram aqui por "
+                          f"estarem marcados como falta — ajuste em 'Lançamento Diário'.")
 
         col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Total atendidos", len(atendimentos_reais))
-        servidores = sum(1 for a in atendimentos_reais if a["servidor"] == "Sim")
-        assistidos = sum(1 for a in atendimentos_reais if a["assistido"] == "Sim" and a["servidor"] != "Sim")
+        col_a.metric("Total atendidos", len(atendimentos))
+        servidores = sum(1 for a in atendimentos if a["servidor"] == "Sim")
+        assistidos = sum(1 for a in atendimentos if a["assistido"] == "Sim" and a["servidor"] != "Sim")
         col_b.metric("Servidores", servidores)
         col_c.metric("Discentes assistidos", assistidos)
 
-        pdf_buffer = gerar_pdf_mapa(medico_sel, especialidade, data_sel, turno_sel, atendimentos)
+        pdf_buffer = gerar_pdf_mapa(medico_sel, especialidade, data_sel, turno_sel,
+                                     atendimentos, total_faltosos=n_faltas)
         st.download_button(
             "🖨️ Baixar Mapa em PDF", data=pdf_buffer,
             file_name=f"Mapa_{medico_sel}_{data_sel.strftime('%d-%m-%Y')}.pdf",

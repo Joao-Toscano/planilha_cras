@@ -9,8 +9,8 @@ from pathlib import Path
 from datetime import date, datetime
 
 DB_PATH = Path(__file__).parent / "cras.db"
-MEDICOS_SEED = Path(__file__).parent / "medicos.json"
-BASE_HISTORICO_SEED = Path(__file__).parent / "base_historico.json"
+MEDICOS_SEED = Path(__file__).parent / "data" / "medicos.json"
+BASE_HISTORICO_SEED = Path(__file__).parent / "data" / "base_historico.json"
 
 NOMES_MES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -65,9 +65,7 @@ def init_db():
             nome_usuario TEXT,
             assistido TEXT,
             servidor TEXT,
-            realizado TEXT,
-            consulta TEXT,
-            falta_profissional TEXT,
+            status TEXT DEFAULT 'Realizado',
             criado_em TEXT
         )
     """)
@@ -126,6 +124,22 @@ def init_db():
             avisos.append(f"Coluna '{col}' estava faltando na tabela 'base' (banco de uma versão "
                            f"anterior) — adicionada automaticamente.")
     conn.commit()
+
+    # Migração da tabela 'ficha': troca o antigo campo tri-state
+    # 'falta_profissional' por 'status' (por atendimento individual).
+    colunas_ficha = {row[1] for row in cur.execute("PRAGMA table_info(ficha)")}
+    if "status" not in colunas_ficha:
+        cur.execute("ALTER TABLE ficha ADD COLUMN status TEXT DEFAULT 'Realizado'")
+        if "falta_profissional" in colunas_ficha:
+            # Registros antigos marcados como falta viram 'Falta do profissional';
+            # os demais (inclusive os sem essa coluna) assumem 'Realizado'.
+            cur.execute("""
+                UPDATE ficha SET status = CASE
+                    WHEN falta_profissional IS NOT NULL AND falta_profissional != 'Presença'
+                    THEN 'Falta do profissional' ELSE 'Realizado' END
+            """)
+        avisos.append("Coluna 'status' adicionada à tabela 'ficha' (banco de uma versão anterior).")
+        conn.commit()
 
     # Sincroniza médicos: roda sempre (não só na primeira vez), usando
     # INSERT OR IGNORE, para preencher automaticamente qualquer médico que
@@ -236,10 +250,8 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
     """
     categoria: 'servidor' | 'assistido' | 'discente'
     Equivale à macro SalvarNaBase do arquivo original.
-    Cada atendimento lançado aqui é, por definição, uma presença do
-    profissional (falta_profissional = 'Presença') — para registrar um dia
-    em que o profissional faltou, sem nenhum paciente atendido, use
-    registrar_falta_profissional().
+    O atendimento entra como status='Realizado' — use atualizar_status_atendimento()
+    depois, na revisão do dia, se precisar marcar que não ocorreu.
     """
     med = buscar_medico(medico)
     especialidade = med["especialidade"] if med else ""
@@ -259,11 +271,11 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
     cur.execute("""
         INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
                             especialidade, matricula, nome_usuario, assistido, servidor,
-                            falta_profissional, criado_em)
+                            status, criado_em)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (nr_cras, data_atendimento.isoformat(), nome_mes(data_atendimento),
           nome_dia(data_atendimento), turno, ordem, medico, especialidade,
-          nr_matricula, usuario, assistido, servidor, "Presença",
+          nr_matricula, usuario, assistido, servidor, "Realizado",
           datetime.now().isoformat(timespec="seconds")))
 
     # Base: um registro agregado por (data, médico). Diferente do VBA original
@@ -301,78 +313,98 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
     conn.close()
 
 
-def registrar_falta_profissional(medico, data_ref: date, turno, motivo):
-    """
-    Registra que o profissional NÃO compareceu num dia/turno (sem nenhum
-    atendimento de paciente) — equivalente a marcar 'Falta profissional' na
-    aba Ficha do arquivo original.
-    motivo: 'Ausência' ou 'Férias/Feriado'
-    """
-    med = buscar_medico(medico)
-    especialidade = med["especialidade"] if med else ""
-    cod_medico = med["cod"] if med else ""
+STATUS_OPCOES = ["Realizado", "Falta do profissional", "Falta do usuário"]
 
+
+def get_atendimentos_do_dia(data_ref: date, medico: str | None = None):
+    """Lista os atendimentos lançados numa data (opcionalmente filtrando por
+    médico), para revisão/marcação de status — equivalente a olhar a aba
+    Ficha filtrada pelo dia."""
+    conn = get_conn()
+    q = "SELECT * FROM ficha WHERE data = ?"
+    params = [data_ref.isoformat()]
+    if medico:
+        q += " AND medico = ?"
+        params.append(medico)
+    q += " ORDER BY turno, nome_usuario"
+    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    conn.close()
+    return rows
+
+
+def _campo_categoria(row):
+    if row["servidor"] == "Sim":
+        return "atendidos_servidores"
+    elif row["assistido"] == "Sim":
+        return "discentes_assistidos"
+    else:
+        return "discentes_naoassistidos"
+
+
+def atualizar_status_atendimento(ficha_id: int, novo_status: str):
+    """
+    Marca um atendimento já lançado como Realizado / Falta do profissional /
+    Falta do usuário, e ajusta os totais agregados da tabela 'base' de
+    acordo — assim o Dashboard e o Mapa continuam corretos.
+    """
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("""
-        INSERT INTO ficha (data, mes, dia_semana, turno, medico, especialidade,
-                            falta_profissional, criado_em)
-        VALUES (?,?,?,?,?,?,?,?)
-    """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref), turno,
-          medico, especialidade, motivo,
-          datetime.now().isoformat(timespec="seconds")))
+    row = cur.execute("SELECT * FROM ficha WHERE id = ?", (ficha_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return False
+    row = dict(row)
+    status_antigo = row["status"] or "Realizado"
 
-    meta = med["meta"] if med else None
-    existente = cur.execute(
-        "SELECT id FROM base WHERE data = ? AND medico = ?",
-        (data_ref.isoformat(), medico)
+    if status_antigo == novo_status:
+        conn.close()
+        return True
+
+    cur.execute("UPDATE ficha SET status = ? WHERE id = ?", (novo_status, ficha_id))
+
+    base_row = cur.execute(
+        "SELECT * FROM base WHERE data = ? AND medico = ?",
+        (row["data"], row["medico"])
     ).fetchone()
 
-    if existente is None:
-        cur.execute("""
-            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
-                               faltosos, meta)
-            VALUES (?,?,?,?,?,?,1,?)
-        """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref),
-              medico, especialidade, cod_medico, meta))
-    else:
-        cur.execute("UPDATE base SET faltosos = faltosos + 1 WHERE id = ?", (existente["id"],))
+    if base_row is not None:
+        campo = _campo_categoria(row)
+        era_realizado = status_antigo == "Realizado"
+        fica_realizado = novo_status == "Realizado"
+
+        if era_realizado and not fica_realizado:
+            cur.execute(f"""
+                UPDATE base SET {campo} = MAX({campo} - 1, 0),
+                                 total_atendidos = MAX(total_atendidos - 1, 0),
+                                 faltosos = faltosos + 1
+                WHERE id = ?
+            """, (base_row["id"],))
+        elif not era_realizado and fica_realizado:
+            cur.execute(f"""
+                UPDATE base SET {campo} = {campo} + 1,
+                                 total_atendidos = total_atendidos + 1,
+                                 faltosos = MAX(faltosos - 1, 0)
+                WHERE id = ?
+            """, (base_row["id"],))
+        # se trocou entre dois motivos de falta diferentes, os totais não mudam
 
     conn.commit()
     conn.close()
+    return True
 
 
-def get_verificacao_atendimento(medico: str, data_sel: date, turno: str | None = None):
-    """
-    Verifica se houve atendimento (ou falta do profissional) num dia/médico —
-    equivalente a conferir a aba Ficha manualmente. Retorna um resumo pronto
-    para exibir na tela.
-    """
+def contar_nao_realizados(medico: str, data_ref: date, turno: str | None = None):
+    """Quantos atendimentos desse dia/médico(/turno) NÃO foram realizados."""
     conn = get_conn()
-    q = "SELECT * FROM ficha WHERE medico = ? AND data = ?"
-    params = [medico, data_sel.isoformat()]
+    q = "SELECT COUNT(*) FROM ficha WHERE medico = ? AND data = ? AND status != 'Realizado'"
+    params = [medico, data_ref.isoformat()]
     if turno:
         q += " AND turno = ?"
         params.append(turno)
-    q += " ORDER BY id"
-    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    n = conn.execute(q, params).fetchone()[0]
     conn.close()
-
-    if not rows:
-        return {"status": "sem_registro", "atendimentos": [], "faltas": []}
-
-    faltas = [r for r in rows if r["falta_profissional"] != "Presença"]
-    atendimentos = [r for r in rows if r["falta_profissional"] == "Presença"]
-
-    if faltas and not atendimentos:
-        status = "faltou"
-    elif atendimentos:
-        status = "atendeu"
-    else:
-        status = "sem_registro"
-
-    return {"status": status, "atendimentos": atendimentos, "faltas": faltas}
+    return n
 
 
 def forcar_reseed_base():
@@ -426,10 +458,10 @@ def get_base_df():
 
 
 def get_mapa_atendimento(medico: str, data_sel: date, turno: str | None):
-    """Retorna a lista de atendimentos de um médico numa data (e turno opcional),
-    equivalente à macro GerarMapaPDF."""
+    """Retorna a lista de atendimentos REALIZADOS de um médico numa data (e
+    turno opcional) — equivalente à macro GerarMapaPDF, já excluindo faltas."""
     conn = get_conn()
-    q = "SELECT * FROM ficha WHERE medico = ? AND data = ?"
+    q = "SELECT * FROM ficha WHERE medico = ? AND data = ? AND status = 'Realizado'"
     params = [medico, data_sel.isoformat()]
     if turno:
         q += " AND turno = ?"

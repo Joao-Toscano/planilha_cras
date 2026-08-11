@@ -11,7 +11,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER
 
 
-def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos):
+def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos, total_faltosos=0):
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4),
                              leftMargin=1.5 * cm, rightMargin=1.5 * cm,
@@ -41,15 +41,13 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos):
     elementos.append(t_cab)
     elementos.append(Spacer(1, 0.4 * cm))
 
-    dados = [["Nº ORDEM", "Nº CRAS", "NOME DO USUÁRIO", "MATRÍCULA/SIAPE",
-              "FALTA PROFISSIONAL", "CATEGORIA USUÁRIO", "ASSINATURA"]]
-
-    # Separa registros de falta do profissional (sem paciente) dos atendimentos reais
-    faltas = [a for a in atendimentos if a.get("falta_profissional") != "Presença"]
-    atendimentos_reais = [a for a in atendimentos if a.get("falta_profissional") == "Presença"]
+    # Nota: 'atendimentos' já vem filtrado só com status='Realizado' (feito em
+    # db.get_mapa_atendimento) — o mapa impresso mostra apenas quem
+    # efetivamente foi atendido.
+    dados = [["Nº ORDEM", "Nº CRAS", "NOME DO USUÁRIO", "MATRÍCULA/SIAPE", "CATEGORIA USUÁRIO", "ASSINATURA"]]
 
     totais = {"Servidor": 0, "Disc. Assistido": 0, "Disc. Nao Assist.": 0}
-    for i, a in enumerate(atendimentos_reais[:12], start=1):
+    for i, a in enumerate(atendimentos[:12], start=1):
         if a["servidor"] == "Sim":
             categoria = "Servidor"
         elif a["assistido"] == "Sim":
@@ -59,15 +57,14 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos):
         totais[categoria] += 1
         dados.append([
             str(i), a.get("nr_cras") or "", a.get("nome_usuario") or "",
-            a.get("matricula") or "", "Presença",
-            categoria, ""
+            a.get("matricula") or "", categoria, ""
         ])
 
     # Preenche linhas em branco até 12
-    for i in range(len(atendimentos_reais) + 1, 13):
-        dados.append([str(i), "", "", "", "", "", ""])
+    for i in range(len(atendimentos) + 1, 13):
+        dados.append([str(i), "", "", "", "", ""])
 
-    t = Table(dados, colWidths=[1.8*cm, 2.2*cm, 6*cm, 3.2*cm, 3.5*cm, 3.8*cm, 3.5*cm])
+    t = Table(dados, colWidths=[1.8*cm, 2.2*cm, 6*cm, 3.2*cm, 3.8*cm, 3.5*cm])
     t.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2E5E4E")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -80,13 +77,10 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos):
     elementos.append(t)
     elementos.append(Spacer(1, 0.5 * cm))
 
-    total_atendidos = len(atendimentos_reais)
-    total_faltosos = len(faltas)
-
     resumo = [[
         f"Servidor: {totais['Servidor']}", f"Discente: {totais['Disc. Nao Assist.']}",
         f"Disc. Assistido (Prape): {totais['Disc. Assistido']}",
-        f"Total Atendidos: {total_atendidos}", f"Faltosos: {total_faltosos}"
+        f"Total Atendidos: {len(atendimentos)}", f"Faltosos: {total_faltosos}"
     ]]
     t_resumo = Table(resumo, colWidths=[5*cm, 5*cm, 6*cm, 4*cm, 3*cm])
     t_resumo.setStyle(TableStyle([
