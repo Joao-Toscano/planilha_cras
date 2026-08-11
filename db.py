@@ -9,8 +9,8 @@ from pathlib import Path
 from datetime import date, datetime
 
 DB_PATH = Path(__file__).parent / "cras.db"
-MEDICOS_SEED = Path(__file__).parent / "medicos.json"
-BASE_HISTORICO_SEED = Path(__file__).parent / "base_historico.json"
+MEDICOS_SEED = Path(__file__).parent / "data" / "medicos.json"
+BASE_HISTORICO_SEED = Path(__file__).parent / "data" / "base_historico.json"
 
 NOMES_MES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -194,11 +194,52 @@ def buscar_medico(nome: str):
     return dict(row) if row else None
 
 
+def adicionar_medico(nome: str, especialidade: str, cod: str, meta):
+    """
+    Adiciona um novo profissional à lista de médicos. Retorna (True, None) em
+    caso de sucesso, ou (False, mensagem) se o nome já existir ou os dados
+    forem inválidos.
+    """
+    nome = (nome or "").strip()
+    if not nome:
+        return False, "O nome não pode ficar em branco."
+
+    if buscar_medico(nome):
+        return False, f"Já existe um médico cadastrado com o nome '{nome}'."
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO medicos (nome, especialidade, cod, meta) VALUES (?,?,?,?)",
+            (nome, (especialidade or "").strip(), (cod or "").strip(), meta)
+        )
+        conn.commit()
+    except sqlite3.IntegrityError as e:
+        conn.close()
+        return False, f"Não foi possível salvar: {e}"
+    conn.close()
+    return True, None
+
+
+def remover_medico(nome: str):
+    """Remove um médico da lista de cadastro (não apaga atendimentos já
+    lançados em seu nome, apenas tira das opções do formulário)."""
+    conn = get_conn()
+    conn.execute("DELETE FROM medicos WHERE nome = ?", (nome,))
+    conn.commit()
+    conn.close()
+
+
 def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
                         nr_matricula, categoria):
     """
     categoria: 'servidor' | 'assistido' | 'discente'
     Equivale à macro SalvarNaBase do arquivo original.
+    Cada atendimento lançado aqui é, por definição, uma presença do
+    profissional (falta_profissional = 'Presença') — para registrar um dia
+    em que o profissional faltou, sem nenhum paciente atendido, use
+    registrar_falta_profissional().
     """
     med = buscar_medico(medico)
     especialidade = med["especialidade"] if med else ""
@@ -218,11 +259,11 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
     cur.execute("""
         INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
                             especialidade, matricula, nome_usuario, assistido, servidor,
-                            criado_em)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            falta_profissional, criado_em)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (nr_cras, data_atendimento.isoformat(), nome_mes(data_atendimento),
           nome_dia(data_atendimento), turno, ordem, medico, especialidade,
-          nr_matricula, usuario, assistido, servidor,
+          nr_matricula, usuario, assistido, servidor, "Presença",
           datetime.now().isoformat(timespec="seconds")))
 
     # Base: um registro agregado por (data, médico). Diferente do VBA original
@@ -258,6 +299,80 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
 
     conn.commit()
     conn.close()
+
+
+def registrar_falta_profissional(medico, data_ref: date, turno, motivo):
+    """
+    Registra que o profissional NÃO compareceu num dia/turno (sem nenhum
+    atendimento de paciente) — equivalente a marcar 'Falta profissional' na
+    aba Ficha do arquivo original.
+    motivo: 'Ausência' ou 'Férias/Feriado'
+    """
+    med = buscar_medico(medico)
+    especialidade = med["especialidade"] if med else ""
+    cod_medico = med["cod"] if med else ""
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO ficha (data, mes, dia_semana, turno, medico, especialidade,
+                            falta_profissional, criado_em)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref), turno,
+          medico, especialidade, motivo,
+          datetime.now().isoformat(timespec="seconds")))
+
+    meta = med["meta"] if med else None
+    existente = cur.execute(
+        "SELECT id FROM base WHERE data = ? AND medico = ?",
+        (data_ref.isoformat(), medico)
+    ).fetchone()
+
+    if existente is None:
+        cur.execute("""
+            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                               faltosos, meta)
+            VALUES (?,?,?,?,?,?,1,?)
+        """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref),
+              medico, especialidade, cod_medico, meta))
+    else:
+        cur.execute("UPDATE base SET faltosos = faltosos + 1 WHERE id = ?", (existente["id"],))
+
+    conn.commit()
+    conn.close()
+
+
+def get_verificacao_atendimento(medico: str, data_sel: date, turno: str | None = None):
+    """
+    Verifica se houve atendimento (ou falta do profissional) num dia/médico —
+    equivalente a conferir a aba Ficha manualmente. Retorna um resumo pronto
+    para exibir na tela.
+    """
+    conn = get_conn()
+    q = "SELECT * FROM ficha WHERE medico = ? AND data = ?"
+    params = [medico, data_sel.isoformat()]
+    if turno:
+        q += " AND turno = ?"
+        params.append(turno)
+    q += " ORDER BY id"
+    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    conn.close()
+
+    if not rows:
+        return {"status": "sem_registro", "atendimentos": [], "faltas": []}
+
+    faltas = [r for r in rows if r["falta_profissional"] != "Presença"]
+    atendimentos = [r for r in rows if r["falta_profissional"] == "Presença"]
+
+    if faltas and not atendimentos:
+        status = "faltou"
+    elif atendimentos:
+        status = "atendeu"
+    else:
+        status = "sem_registro"
+
+    return {"status": status, "atendimentos": atendimentos, "faltas": faltas}
 
 
 def forcar_reseed_base():

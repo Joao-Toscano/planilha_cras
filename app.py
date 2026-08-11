@@ -67,6 +67,61 @@ if pagina == "📝 Lançamento Diário":
     st.divider()
     st.caption(f"Última atualização: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}")
 
+    # -----------------------------------------------------------------
+    # Registrar falta do profissional (sem nenhum atendimento no dia)
+    # -----------------------------------------------------------------
+    with st.expander("🚫 Registrar falta do profissional (dia sem nenhum atendimento)"):
+        st.caption("Use aqui quando o profissional não compareceu — sem preencher um "
+                   "atendimento por paciente.")
+        with st.form("form_falta", clear_on_submit=True):
+            colf1, colf2, colf3 = st.columns(3)
+            with colf1:
+                medico_falta = st.selectbox("Médico", nomes_medicos, index=None,
+                                             placeholder="Selecione o médico", key="medico_falta")
+            with colf2:
+                data_falta = st.date_input("Data", value=date.today(), format="DD/MM/YYYY", key="data_falta")
+            with colf3:
+                turno_falta = st.selectbox("Turno", ["MANHÃ", "TARDE"], key="turno_falta")
+            motivo_falta = st.radio("Motivo", ["Ausência", "Férias/Feriado"], horizontal=True)
+            enviar_falta = st.form_submit_button("Registrar falta")
+
+        if enviar_falta:
+            if not medico_falta:
+                st.error("Selecione o médico.")
+            else:
+                db.registrar_falta_profissional(medico_falta, data_falta, turno_falta, motivo_falta)
+                st.success(f"Falta registrada: {medico_falta} — {data_falta.strftime('%d/%m/%Y')} ({motivo_falta}).")
+
+    # -----------------------------------------------------------------
+    # Verificação: houve ou não atendimento nesse dia/médico?
+    # -----------------------------------------------------------------
+    with st.expander("🔍 Verificar se houve atendimento num dia"):
+        colv1, colv2, colv3 = st.columns(3)
+        with colv1:
+            medico_verif = st.selectbox("Médico", nomes_medicos, index=None,
+                                         placeholder="Selecione o médico", key="medico_verif")
+        with colv2:
+            data_verif = st.date_input("Data", value=date.today(), format="DD/MM/YYYY", key="data_verif")
+        with colv3:
+            turno_verif = st.selectbox("Turno", ["Ambos", "MANHÃ", "TARDE"], key="turno_verif")
+
+        if medico_verif:
+            turno_filtro = None if turno_verif == "Ambos" else turno_verif
+            resultado = db.get_verificacao_atendimento(medico_verif, data_verif, turno_filtro)
+
+            if resultado["status"] == "sem_registro":
+                st.warning("Nenhum registro encontrado — não foi lançado atendimento nem falta "
+                          "para esse dia/médico/turno.")
+            elif resultado["status"] == "faltou":
+                motivos = ", ".join(sorted({f["falta_profissional"] for f in resultado["faltas"]}))
+                st.error(f"❌ Não houve atendimento — profissional ausente ({motivos}).")
+            else:
+                st.success(f"✅ Houve atendimento — {len(resultado['atendimentos'])} paciente(s) "
+                          f"atendido(s) nesse dia/turno.")
+                df_v = pd.DataFrame(resultado["atendimentos"])[["nome_usuario", "matricula", "turno"]]
+                df_v.columns = ["Nome do usuário", "Matrícula", "Turno"]
+                st.dataframe(df_v, use_container_width=True, hide_index=True)
+
 # =====================================================================
 # PÁGINA 2 — Mapa de Atendimento (equivalente à aba "Mapa Impressao")
 # =====================================================================
@@ -108,21 +163,26 @@ elif pagina == "🖨️ Mapa de Atendimento":
         st.subheader(f"{medico_sel} — {especialidade}")
         st.write(f"**Data:** {data_sel.strftime('%d/%m/%Y')} · **Turno:** {turno_sel}")
 
-        if atendimentos:
-            df = pd.DataFrame(atendimentos)[
-                ["nr_cras", "nome_usuario", "matricula", "falta_profissional",
-                 "assistido", "servidor"]
+        faltas = [a for a in atendimentos if a.get("falta_profissional") != "Presença"]
+        atendimentos_reais = [a for a in atendimentos if a.get("falta_profissional") == "Presença"]
+
+        if faltas and not atendimentos_reais:
+            motivos = ", ".join(sorted({f["falta_profissional"] for f in faltas}))
+            st.error(f"❌ Profissional ausente nesse dia/turno ({motivos}) — nenhum atendimento realizado.")
+        elif not atendimentos and not faltas:
+            st.warning("Nenhum registro encontrado — sem atendimento nem falta lançados para esse filtro.")
+
+        if atendimentos_reais:
+            df = pd.DataFrame(atendimentos_reais)[
+                ["nr_cras", "nome_usuario", "matricula", "assistido", "servidor"]
             ]
-            df.columns = ["Nº CRAS", "Nome do usuário", "Matrícula", "Falta profissional",
-                           "Assistido", "Servidor"]
+            df.columns = ["Nº CRAS", "Nome do usuário", "Matrícula", "Assistido", "Servidor"]
             st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("Nenhum atendimento encontrado para esse filtro.")
 
         col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Total atendidos", len(atendimentos))
-        servidores = sum(1 for a in atendimentos if a["servidor"] == "Sim")
-        assistidos = sum(1 for a in atendimentos if a["assistido"] == "Sim" and a["servidor"] != "Sim")
+        col_a.metric("Total atendidos", len(atendimentos_reais))
+        servidores = sum(1 for a in atendimentos_reais if a["servidor"] == "Sim")
+        assistidos = sum(1 for a in atendimentos_reais if a["assistido"] == "Sim" and a["servidor"] != "Sim")
         col_b.metric("Servidores", servidores)
         col_c.metric("Discentes assistidos", assistidos)
 
@@ -204,8 +264,42 @@ elif pagina == "📁 Base de Dados":
                                 "base.csv", "text/csv")
 
     with aba[2]:
-        df = pd.DataFrame(db.listar_medicos())
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.subheader("➕ Adicionar novo médico")
+        with st.form("form_novo_medico", clear_on_submit=True):
+            colm1, colm2 = st.columns(2)
+            with colm1:
+                novo_nome = st.text_input("Nome completo")
+                nova_especialidade = st.text_input("Especialidade")
+            with colm2:
+                novo_cod = st.text_input("Código (opcional, ex: A, B, C...)")
+                nova_meta = st.number_input("Meta de atendimento diária (opcional)",
+                                             min_value=0, step=1, value=0)
+            enviar_medico = st.form_submit_button("Adicionar médico")
+
+        if enviar_medico:
+            meta_final = nova_meta if nova_meta > 0 else None
+            ok, erro = db.adicionar_medico(novo_nome, nova_especialidade, novo_cod, meta_final)
+            if ok:
+                st.success(f"Médico '{novo_nome.strip()}' adicionado com sucesso!")
+                st.rerun()
+            else:
+                st.error(erro)
+
+        st.divider()
+        st.subheader("Médicos cadastrados")
+        df_medicos = pd.DataFrame(db.listar_medicos())
+        st.dataframe(df_medicos, use_container_width=True, hide_index=True)
+
+        with st.expander("🗑️ Remover um médico da lista"):
+            st.caption("Isso só tira o nome das opções do formulário — atendimentos já "
+                       "lançados em nome desse médico continuam salvos normalmente.")
+            nomes_remover = [m["nome"] for m in db.listar_medicos()]
+            medico_remover = st.selectbox("Médico a remover", nomes_remover, index=None,
+                                           placeholder="Selecione", key="medico_remover")
+            if st.button("Remover", type="secondary") and medico_remover:
+                db.remover_medico(medico_remover)
+                st.success(f"'{medico_remover}' removido da lista.")
+                st.rerun()
 
     with aba[3]:
         st.caption("Use esta aba se os gráficos ou a lista de médicos aparecerem vazios.")

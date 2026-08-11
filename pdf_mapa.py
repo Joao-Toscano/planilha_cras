@@ -44,8 +44,12 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos):
     dados = [["Nº ORDEM", "Nº CRAS", "NOME DO USUÁRIO", "MATRÍCULA/SIAPE",
               "FALTA PROFISSIONAL", "CATEGORIA USUÁRIO", "ASSINATURA"]]
 
+    # Separa registros de falta do profissional (sem paciente) dos atendimentos reais
+    faltas = [a for a in atendimentos if a.get("falta_profissional") != "Presença"]
+    atendimentos_reais = [a for a in atendimentos if a.get("falta_profissional") == "Presença"]
+
     totais = {"Servidor": 0, "Disc. Assistido": 0, "Disc. Nao Assist.": 0}
-    for i, a in enumerate(atendimentos[:12], start=1):
+    for i, a in enumerate(atendimentos_reais[:12], start=1):
         if a["servidor"] == "Sim":
             categoria = "Servidor"
         elif a["assistido"] == "Sim":
@@ -55,12 +59,12 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos):
         totais[categoria] += 1
         dados.append([
             str(i), a.get("nr_cras") or "", a.get("nome_usuario") or "",
-            a.get("matricula") or "", a.get("falta_profissional") or "",
+            a.get("matricula") or "", "Presença",
             categoria, ""
         ])
 
     # Preenche linhas em branco até 12
-    for i in range(len(atendimentos) + 1, 13):
+    for i in range(len(atendimentos_reais) + 1, 13):
         dados.append([str(i), "", "", "", "", "", ""])
 
     t = Table(dados, colWidths=[1.8*cm, 2.2*cm, 6*cm, 3.2*cm, 3.5*cm, 3.8*cm, 3.5*cm])
@@ -76,8 +80,8 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos):
     elementos.append(t)
     elementos.append(Spacer(1, 0.5 * cm))
 
-    total_atendidos = len(atendimentos)
-    total_faltosos = sum(1 for a in atendimentos if a.get("falta_profissional") == "Não")
+    total_atendidos = len(atendimentos_reais)
+    total_faltosos = len(faltas)
 
     resumo = [[
         f"Servidor: {totais['Servidor']}", f"Discente: {totais['Disc. Nao Assist.']}",
