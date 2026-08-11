@@ -6,7 +6,10 @@ import db
 from pdf_mapa import gerar_pdf_mapa
 
 st.set_page_config(page_title="CRAS - Sistema de Atendimento", page_icon="🏥", layout="wide")
-db.init_db()
+avisos_init = db.init_db()
+if avisos_init:
+    with st.sidebar:
+        st.error("⚠️ Problemas ao carregar os dados iniciais — veja 'Base de Dados > Diagnóstico'.")
 
 st.sidebar.title("🏥 CRAS")
 pagina = st.sidebar.radio(
@@ -180,7 +183,8 @@ elif pagina == "📊 Dashboard":
 elif pagina == "📁 Base de Dados":
     st.title("Base de Dados")
 
-    aba = st.tabs(["Ficha (todos os atendimentos)", "Base (resumo por dia/médico)", "Médicos cadastrados"])
+    aba = st.tabs(["Ficha (todos os atendimentos)", "Base (resumo por dia/médico)",
+                   "Médicos cadastrados", "🔧 Diagnóstico"])
 
     with aba[0]:
         df = db.get_ficha_df()
@@ -199,3 +203,33 @@ elif pagina == "📁 Base de Dados":
     with aba[2]:
         df = pd.DataFrame(db.listar_medicos())
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+    with aba[3]:
+        st.caption("Use esta aba se os gráficos do Dashboard aparecerem vazios.")
+        if avisos_init:
+            for a in avisos_init:
+                st.error(a)
+        else:
+            st.success("Nenhum problema encontrado na inicialização.")
+
+        st.write("**Caminhos verificados:**")
+        st.code(
+            f"Banco de dados:     {db.DB_PATH}  (existe: {db.DB_PATH.exists()})\n"
+            f"Seed de médicos:    {db.MEDICOS_SEED}  (existe: {db.MEDICOS_SEED.exists()})\n"
+            f"Seed do histórico:  {db.BASE_HISTORICO_SEED}  (existe: {db.BASE_HISTORICO_SEED.exists()})",
+            language="text"
+        )
+
+        base_df = db.get_base_df()
+        medicos_df = pd.DataFrame(db.listar_medicos())
+        st.write("**Linhas atualmente no banco:**")
+        st.write(f"- Tabela `base` (histórico + lançamentos): **{len(base_df)}** linhas")
+        st.write(f"- Tabela `medicos`: **{len(medicos_df)}** linhas")
+
+        if st.button("🔄 Forçar recarregar o histórico (se a tabela 'base' estiver vazia)"):
+            recarregados = db.forcar_reseed_base()
+            if recarregados:
+                st.success(f"{recarregados} registros recarregados do histórico. Atualize a página.")
+            else:
+                st.warning("A tabela 'base' já tem dados (ou o arquivo de histórico não foi "
+                           "encontrado) — nada foi alterado, para não duplicar registros.")

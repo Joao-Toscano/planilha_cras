@@ -36,6 +36,8 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
+    avisos = []
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS medicos (
             id INTEGER PRIMARY KEY,
@@ -98,39 +100,72 @@ def init_db():
 
     conn.commit()
 
+    # Migração defensiva: se já existir um cras.db de uma versão anterior
+    # (sem as colunas de agregados), adiciona as colunas que faltarem, para
+    # não falhar silenciosamente nem quebrar com "no such column".
+    colunas_esperadas = {
+        "discentes_assistidos": "INTEGER DEFAULT 0",
+        "discentes_naoassistidos": "INTEGER DEFAULT 0",
+        "atendidos_servidores": "INTEGER DEFAULT 0",
+        "faltosos": "INTEGER DEFAULT 0",
+        "falta_profissional": "INTEGER DEFAULT 0",
+        "agendados": "INTEGER",
+        "total_atendidos": "INTEGER DEFAULT 0",
+        "meta": "INTEGER",
+        "absenteismo": "REAL",
+        "ocupacao": "REAL",
+        "classif_absenteismo": "TEXT",
+        "classif_ocupacao": "TEXT",
+        "classif_desempenho": "TEXT",
+    }
+    colunas_existentes = {row[1] for row in cur.execute("PRAGMA table_info(base)")}
+    for col, tipo in colunas_esperadas.items():
+        if col not in colunas_existentes:
+            cur.execute(f"ALTER TABLE base ADD COLUMN {col} {tipo}")
+            avisos.append(f"Coluna '{col}' estava faltando na tabela 'base' (banco de uma versão "
+                           f"anterior) — adicionada automaticamente.")
+    conn.commit()
+
     # Semeia médicos se a tabela estiver vazia
     cur.execute("SELECT COUNT(*) FROM medicos")
-    if cur.fetchone()[0] == 0 and MEDICOS_SEED.exists():
-        medicos = json.loads(MEDICOS_SEED.read_text(encoding="utf-8"))
-        cur.executemany(
-            "INSERT INTO medicos (id, nome, especialidade, cod, meta) VALUES (?,?,?,?,?)",
-            [(m["id"], m["nome"], m["especialidade"], m["cod"], m["meta"]) for m in medicos]
-        )
-        conn.commit()
+    if cur.fetchone()[0] == 0:
+        if MEDICOS_SEED.exists():
+            medicos = json.loads(MEDICOS_SEED.read_text(encoding="utf-8"))
+            cur.executemany(
+                "INSERT INTO medicos (id, nome, especialidade, cod, meta) VALUES (?,?,?,?,?)",
+                [(m["id"], m["nome"], m["especialidade"], m["cod"], m["meta"]) for m in medicos]
+            )
+            conn.commit()
+        else:
+            avisos.append(f"Arquivo de médicos não encontrado em: {MEDICOS_SEED}")
 
     # Semeia o histórico real (aba "Base 2025 - 2026" do arquivo original)
     # se a tabela 'base' ainda estiver vazia
     cur.execute("SELECT COUNT(*) FROM base")
-    if cur.fetchone()[0] == 0 and BASE_HISTORICO_SEED.exists():
-        registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
-        cur.executemany("""
-            INSERT OR IGNORE INTO base
-                (data, mes, dia_semana, medico, especialidade, cod_medico,
-                 discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
-                 faltosos, falta_profissional, agendados, total_atendidos, meta,
-                 absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, [
-            (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
-             r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
-             r["faltosos"], r["falta_profissional"], r["agendados"], r["total_atendidos"], r["meta"],
-             r["absenteismo"], r["ocupacao"], r["classif_absenteismo"], r["classif_ocupacao"],
-             r["classif_desempenho"])
-            for r in registros
-        ])
-        conn.commit()
+    if cur.fetchone()[0] == 0:
+        if BASE_HISTORICO_SEED.exists():
+            registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
+            cur.executemany("""
+                INSERT OR IGNORE INTO base
+                    (data, mes, dia_semana, medico, especialidade, cod_medico,
+                     discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
+                     faltosos, falta_profissional, agendados, total_atendidos, meta,
+                     absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, [
+                (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
+                 r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
+                 r["faltosos"], r["falta_profissional"], r["agendados"], r["total_atendidos"], r["meta"],
+                 r["absenteismo"], r["ocupacao"], r["classif_absenteismo"], r["classif_ocupacao"],
+                 r["classif_desempenho"])
+                for r in registros
+            ])
+            conn.commit()
+        else:
+            avisos.append(f"Arquivo de histórico não encontrado em: {BASE_HISTORICO_SEED}")
 
     conn.close()
+    return avisos
 
 
 def listar_medicos():
@@ -211,6 +246,40 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
 
     conn.commit()
     conn.close()
+
+
+def forcar_reseed_base():
+    """Recarrega o histórico manualmente, só se a tabela 'base' estiver vazia
+    (evita duplicar registros se já tiver dados). Usado pelo botão de
+    diagnóstico. Retorna o número de registros inseridos (0 se nada mudou)."""
+    if not BASE_HISTORICO_SEED.exists():
+        return 0
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM base")
+    if cur.fetchone()[0] > 0:
+        conn.close()
+        return 0
+    registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
+    cur.executemany("""
+        INSERT OR IGNORE INTO base
+            (data, mes, dia_semana, medico, especialidade, cod_medico,
+             discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
+             faltosos, falta_profissional, agendados, total_atendidos, meta,
+             absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, [
+        (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
+         r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
+         r["faltosos"], r["falta_profissional"], r["agendados"], r["total_atendidos"], r["meta"],
+         r["absenteismo"], r["ocupacao"], r["classif_absenteismo"], r["classif_ocupacao"],
+         r["classif_desempenho"])
+        for r in registros
+    ])
+    conn.commit()
+    n = len(registros)
+    conn.close()
+    return n
 
 
 def get_ficha_df():
