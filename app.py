@@ -5,6 +5,31 @@ import pandas as pd
 import db
 from pdf_mapa import gerar_pdf_mapa
 
+
+def dashboard_liberado():
+    """
+    Verifica a senha do Dashboard, se uma tiver sido configurada em
+    Base de Dados > ⚙️ Configurações. Sem senha definida, o acesso fica
+    livre (comportamento padrão).
+    """
+    senha_definida = db.get_config("dashboard_senha", "")
+    if not senha_definida:
+        return True
+    if st.session_state.get("dashboard_ok"):
+        return True
+
+    st.title("📊 Dashboard")
+    st.subheader("🔒 Esta página é protegida por senha")
+    senha_input = st.text_input("Digite a senha", type="password", key="senha_dashboard_input")
+    if st.button("Entrar"):
+        if senha_input == senha_definida:
+            st.session_state["dashboard_ok"] = True
+            st.rerun()
+        else:
+            st.error("Senha incorreta.")
+    return False
+
+
 st.set_page_config(page_title="CRAS - Sistema de Atendimento", page_icon="🏥", layout="wide")
 resultado_init = db.init_db()
 if resultado_init["erros"]:
@@ -216,6 +241,8 @@ elif pagina == "🖨️ Mapa de Atendimento":
 # PÁGINA 3 — Dashboard
 # =====================================================================
 elif pagina == "📊 Dashboard":
+    if not dashboard_liberado():
+        st.stop()
     st.title("Dashboard")
     st.caption("Os mesmos 10 gráficos da planilha original (aba 'Dinâmicas'), calculados a partir "
                "do histórico real + lançamentos feitos aqui no app.")
@@ -347,7 +374,7 @@ elif pagina == "📁 Base de Dados":
     st.title("Base de Dados")
 
     aba = st.tabs(["Ficha (todos os atendimentos)", "Base (resumo por dia/médico)",
-                   "Médicos cadastrados", "🔧 Diagnóstico"])
+                   "Médicos cadastrados", "⚙️ Configurações", "🔧 Diagnóstico"])
 
     with aba[0]:
         df = db.get_ficha_df()
@@ -402,6 +429,42 @@ elif pagina == "📁 Base de Dados":
                 st.rerun()
 
     with aba[3]:
+        st.subheader("🔒 Senha do Dashboard")
+        senha_atual = db.get_config("dashboard_senha", "")
+        if senha_atual:
+            st.success("O Dashboard está protegido por senha.")
+        else:
+            st.info("O Dashboard está com acesso livre (sem senha definida).")
+
+        with st.form("form_senha_dashboard"):
+            nova_senha = st.text_input("Nova senha (deixe em branco para remover a proteção)",
+                                        type="password")
+            confirmar = st.text_input("Confirme a nova senha", type="password")
+            salvar_senha = st.form_submit_button("Salvar")
+
+        if salvar_senha:
+            if nova_senha != confirmar:
+                st.error("As senhas não coincidem.")
+            else:
+                db.set_config("dashboard_senha", nova_senha)
+                st.session_state.pop("dashboard_ok", None)
+                if nova_senha:
+                    st.success("Senha definida! O Dashboard agora pede senha para abrir.")
+                else:
+                    st.success("Proteção removida — o Dashboard ficou com acesso livre.")
+                st.rerun()
+
+        st.divider()
+        st.subheader("Nome do Chefe de Setor")
+        st.caption("Usado na assinatura do Mapa de Atendimento em PDF (também editável na "
+                   "página 'Mapa de Atendimento').")
+        chefe_config = st.text_input("Nome", value=db.get_config("chefe_setor", ""),
+                                      key="chefe_setor_config")
+        if chefe_config != db.get_config("chefe_setor", ""):
+            db.set_config("chefe_setor", chefe_config)
+            st.success("Salvo.")
+
+    with aba[4]:
         st.caption("Use esta aba se os gráficos ou a lista de médicos aparecerem vazios.")
         if resultado_init["erros"]:
             for e in resultado_init["erros"]:
