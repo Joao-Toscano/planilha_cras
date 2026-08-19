@@ -74,7 +74,7 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
     linha_info = (
         f"SERVIÇO: {especialidade or ''}&nbsp;&nbsp;&nbsp;"
         f"PROFISSIONAL: {medico or ''}&nbsp;&nbsp;&nbsp;"
-        f"DATA: ___/___/{data_sel.year}&nbsp;&nbsp;&nbsp;"
+        f"DATA: {data_sel.strftime('%d/%m/%Y')}&nbsp;&nbsp;&nbsp;"
         f"TURNO: MANHÃ {marca_manha}&nbsp;&nbsp;TARDE {marca_tarde}"
     )
     elementos.append(Paragraph(linha_info, info_style))
