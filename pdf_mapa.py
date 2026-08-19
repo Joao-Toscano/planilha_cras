@@ -43,7 +43,7 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
                                    fontName="Helvetica-Bold", fontSize=13, spaceAfter=2)
     sub_style = ParagraphStyle("sub", parent=styles["Normal"], alignment=TA_CENTER,
                                 fontName="Helvetica-Bold", fontSize=9, leading=11)
-    info_style = ParagraphStyle("info", parent=styles["Normal"], alignment=TA_LEFT,
+    info_style = ParagraphStyle("info", parent=styles["Normal"], alignment=TA_CENTER,
                                  fontName="Helvetica-Bold", fontSize=9)
 
     elementos = []
@@ -159,7 +159,8 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
         f"Servidor: {servidores}&nbsp;&nbsp;&nbsp;Discente: {discentes}&nbsp;&nbsp;&nbsp;"
         f"Discente assistido pela Prape: {disc_assistido}&nbsp;&nbsp;&nbsp;"
         f"Pesquisa/Extensão: 0&nbsp;&nbsp;&nbsp;Consulta: {primeira}&nbsp;&nbsp;&nbsp;"
-        f"Retorno: {retorno}&nbsp;&nbsp;&nbsp;tratamento: {tratamento}"
+        f"Retorno: {retorno}&nbsp;&nbsp;&nbsp;tratamento: {tratamento}&nbsp;&nbsp;&nbsp;"
+        f"Faltosos: {total_faltosos}"
     )
     t_resumo = Table([[Paragraph(resumo_txt, projeto_style)]], colWidths=[sum(col_widths)])
     t_resumo.setStyle(TableStyle([
@@ -168,21 +169,18 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
     ]))
     elementos.append(t_resumo)
-    if total_faltosos:
-        elementos.append(Spacer(1, 0.1 * cm))
-        elementos.append(Paragraph(f"Faltosos (não realizados): {total_faltosos}", projeto_style))
 
     elementos.append(Spacer(1, 0.3 * cm))
 
     # --- Assinaturas ---
     nome_style = ParagraphStyle("nome", parent=styles["Normal"], fontName="Helvetica-Bold",
-                                 fontSize=9)
+                                 fontSize=9, alignment=TA_CENTER)
     label_style = ParagraphStyle("label", parent=styles["Normal"], fontName="Helvetica-Bold",
                                   fontSize=8, alignment=TA_CENTER)
     linha_assin = "_" * 40
 
     t_assin = Table([
-        [Paragraph(chefe_setor or "", nome_style), Paragraph(medico or "", nome_style)],
+        [Paragraph(chefe_setor or "", nome_style), ""],
         [Paragraph(linha_assin, nome_style), Paragraph(linha_assin, nome_style)],
         [Paragraph("ASSINATURA CHEFE DE SETOR", label_style),
          Paragraph("ASSINATURA E CARIMBO DO PROFISSIONAL", label_style)],
@@ -190,6 +188,7 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
     t_assin.setStyle(TableStyle([
         ("TOPPADDING", (0, 0), (-1, -1), 2),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
     ]))
     elementos.append(t_assin)
 
