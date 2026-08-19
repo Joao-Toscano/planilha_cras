@@ -9,8 +9,8 @@ from pathlib import Path
 from datetime import date, datetime
 
 DB_PATH = Path(__file__).parent / "cras.db"
-MEDICOS_SEED = Path(__file__).parent / "medicos.json"
-BASE_HISTORICO_SEED = Path(__file__).parent / "base_historico.json"
+MEDICOS_SEED = Path(__file__).parent / "data" / "medicos.json"
+BASE_HISTORICO_SEED = Path(__file__).parent / "data" / "base_historico.json"
 
 NOMES_MES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]

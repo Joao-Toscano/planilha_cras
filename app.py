@@ -104,18 +104,19 @@ if pagina == "📝 Lançamento Diário":
             key="editor_atendimentos_dia",
         )
 
-        if st.button("💾 Salvar alterações de status"):
-            mudou = 0
-            for ficha_id, linha in editado.iterrows():
-                status_original = df_rev_exibir.loc[ficha_id, "Status"]
-                if linha["Status"] != status_original:
-                    db.atualizar_status_atendimento(int(ficha_id), linha["Status"])
-                    mudou += 1
-            if mudou:
-                st.success(f"{mudou} atendimento(s) atualizado(s).")
-                st.rerun()
-            else:
-                st.info("Nenhuma alteração para salvar.")
+        # Salva automaticamente qualquer mudança de status assim que ela
+        # acontece (sem precisar de um botão separado) — compara o que veio
+        # do editor com o que estava no banco nesse carregamento da página.
+        mudancas = [
+            (int(ficha_id), linha["Status"])
+            for ficha_id, linha in editado.iterrows()
+            if linha["Status"] != df_rev_exibir.loc[ficha_id, "Status"]
+        ]
+        if mudancas:
+            for ficha_id, novo_status in mudancas:
+                db.atualizar_status_atendimento(ficha_id, novo_status)
+            st.toast(f"{len(mudancas)} atendimento(s) atualizado(s).", icon="✅")
+            st.rerun()
 
     st.caption(f"Última atualização: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}")
 
@@ -137,22 +138,12 @@ elif pagina == "🖨️ Mapa de Atendimento":
     with col3:
         turno_sel = st.selectbox("Turno", ["Ambos", "MANHÃ", "TARDE"])
 
-    if st.button("🔎 Gerar Mapa"):
-        if not medico_sel:
-            st.error("Informe o médico.")
-        else:
-            turno_filtro = None if turno_sel == "Ambos" else turno_sel
-            atendimentos = db.get_mapa_atendimento(medico_sel, data_sel, turno_filtro)
-            st.session_state["mapa_atendimentos"] = atendimentos
-            st.session_state["mapa_medico"] = medico_sel
-            st.session_state["mapa_data"] = data_sel
-            st.session_state["mapa_turno"] = turno_sel
-
-    if "mapa_atendimentos" in st.session_state:
-        atendimentos = st.session_state["mapa_atendimentos"]
-        medico_sel = st.session_state["mapa_medico"]
-        data_sel = st.session_state["mapa_data"]
-        turno_sel = st.session_state["mapa_turno"]
+    # Sempre busca na hora, direto do banco — sem guardar em cache entre
+    # páginas, para nunca mostrar um resultado desatualizado depois de
+    # alguém mudar um status na página de Lançamento Diário.
+    if medico_sel:
+        turno_filtro = None if turno_sel == "Ambos" else turno_sel
+        atendimentos = db.get_mapa_atendimento(medico_sel, data_sel, turno_filtro)
 
         med = db.buscar_medico(medico_sel)
         especialidade = med["especialidade"] if med else ""
@@ -160,8 +151,7 @@ elif pagina == "🖨️ Mapa de Atendimento":
         st.subheader(f"{medico_sel} — {especialidade}")
         st.write(f"**Data:** {data_sel.strftime('%d/%m/%Y')} · **Turno:** {turno_sel}")
 
-        turno_filtro_faltas = None if turno_sel == "Ambos" else turno_sel
-        n_faltas = db.contar_nao_realizados(medico_sel, data_sel, turno_filtro_faltas)
+        n_faltas = db.contar_nao_realizados(medico_sel, data_sel, turno_filtro)
 
         if not atendimentos and n_faltas:
             st.error(f"❌ Nenhum atendimento realizado nesse dia/turno — {n_faltas} falta(s) registrada(s).")
@@ -192,6 +182,8 @@ elif pagina == "🖨️ Mapa de Atendimento":
             file_name=f"Mapa_{medico_sel}_{data_sel.strftime('%d-%m-%Y')}.pdf",
             mime="application/pdf",
         )
+    else:
+        st.info("Selecione um médico para ver o mapa de atendimento.")
 
 # =====================================================================
 # PÁGINA 3 — Dashboard
