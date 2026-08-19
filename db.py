@@ -9,8 +9,8 @@ from pathlib import Path
 from datetime import date, datetime
 
 DB_PATH = Path(__file__).parent / "cras.db"
-MEDICOS_SEED = Path(__file__).parent / "medicos.json"
-BASE_HISTORICO_SEED = Path(__file__).parent / "base_historico.json"
+MEDICOS_SEED = Path(__file__).parent / "data" / "medicos.json"
+BASE_HISTORICO_SEED = Path(__file__).parent / "data" / "base_historico.json"
 
 NOMES_MES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -40,6 +40,13 @@ def init_db():
     erros = []
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            chave TEXT PRIMARY KEY,
+            valor TEXT
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS medicos (
             id INTEGER PRIMARY KEY,
             nome TEXT UNIQUE NOT NULL,
@@ -65,10 +72,12 @@ def init_db():
             nome_usuario TEXT,
             assistido TEXT,
             servidor TEXT,
+            consulta TEXT,
             status TEXT DEFAULT 'Realizado',
             criado_em TEXT
         )
     """)
+
 
     # Base: um registro por (data, médico) - equivalente às abas "Base" / "Base 2025 - 2026"
     cur.execute("""
@@ -139,6 +148,10 @@ def init_db():
                     THEN 'Falta do profissional' ELSE 'Realizado' END
             """)
         avisos.append("Coluna 'status' adicionada à tabela 'ficha' (banco de uma versão anterior).")
+        conn.commit()
+    if "consulta" not in colunas_ficha:
+        cur.execute("ALTER TABLE ficha ADD COLUMN consulta TEXT")
+        avisos.append("Coluna 'consulta' adicionada à tabela 'ficha' (banco de uma versão anterior).")
         conn.commit()
 
     # Sincroniza médicos: roda sempre (não só na primeira vez), usando
@@ -246,9 +259,11 @@ def remover_medico(nome: str):
 
 
 def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
-                        nr_matricula, categoria):
+                        nr_matricula, categoria, consulta="Primeira consulta"):
     """
     categoria: 'servidor' | 'assistido' | 'discente'
+    consulta: 'Primeira consulta' | 'Retorno' | 'Acompanhamento/tratamento'
+              (equivale aos códigos 0/1/2 do Mapa de Atendimento impresso)
     Equivale à macro SalvarNaBase do arquivo original.
     O atendimento entra como status='Realizado' — use atualizar_status_atendimento()
     depois, na revisão do dia, se precisar marcar que não ocorreu.
@@ -271,11 +286,11 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
     cur.execute("""
         INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
                             especialidade, matricula, nome_usuario, assistido, servidor,
-                            status, criado_em)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                            consulta, status, criado_em)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (nr_cras, data_atendimento.isoformat(), nome_mes(data_atendimento),
           nome_dia(data_atendimento), turno, ordem, medico, especialidade,
-          nr_matricula, usuario, assistido, servidor, "Realizado",
+          nr_matricula, usuario, assistido, servidor, consulta, "Realizado",
           datetime.now().isoformat(timespec="seconds")))
 
     # Base: um registro agregado por (data, médico). Diferente do VBA original
@@ -407,6 +422,45 @@ def contar_nao_realizados(medico: str, data_ref: date, turno: str | None = None)
     return n
 
 
+def excluir_atendimento(ficha_id: int):
+    """
+    Exclui definitivamente um lançamento (por engano, duplicado, etc.) e
+    ajusta os totais agregados da tabela 'base' de acordo, para não deixar
+    contagem "fantasma" nos totais/Dashboard.
+    Retorna True se excluiu, False se o registro não foi encontrado.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    row = cur.execute("SELECT * FROM ficha WHERE id = ?", (ficha_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return False
+    row = dict(row)
+
+    base_row = cur.execute(
+        "SELECT * FROM base WHERE data = ? AND medico = ?",
+        (row["data"], row["medico"])
+    ).fetchone()
+
+    if base_row is not None:
+        if row["status"] == "Realizado":
+            campo = _campo_categoria(row)
+            cur.execute(f"""
+                UPDATE base SET {campo} = MAX({campo} - 1, 0),
+                                 total_atendidos = MAX(total_atendidos - 1, 0)
+                WHERE id = ?
+            """, (base_row["id"],))
+        else:
+            cur.execute("UPDATE base SET faltosos = MAX(faltosos - 1, 0) WHERE id = ?",
+                        (base_row["id"],))
+
+    cur.execute("DELETE FROM ficha WHERE id = ?", (ficha_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
 def forcar_reseed_base():
     """Recarrega o histórico manualmente, só se a tabela 'base' estiver vazia
     (evita duplicar registros se já tiver dados). Usado pelo botão de
@@ -455,6 +509,21 @@ def get_base_df():
     df = pd.read_sql_query("SELECT * FROM base ORDER BY data", conn)
     conn.close()
     return df
+
+
+def get_config(chave, default=""):
+    conn = get_conn()
+    row = conn.execute("SELECT valor FROM config WHERE chave = ?", (chave,)).fetchone()
+    conn.close()
+    return row["valor"] if row else default
+
+
+def set_config(chave, valor):
+    conn = get_conn()
+    conn.execute("INSERT INTO config (chave, valor) VALUES (?, ?) "
+                 "ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor", (chave, valor))
+    conn.commit()
+    conn.close()
 
 
 def get_mapa_atendimento(medico: str, data_sel: date, turno: str | None):

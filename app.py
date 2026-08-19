@@ -37,8 +37,8 @@ if pagina == "📝 Lançamento Diário":
             data_atendimento = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
             turno = st.selectbox("Turno", ["MANHÃ", "TARDE"])
             usuario = st.text_input("Nome do usuário")
-        with col2:
             nr_matricula = st.text_input("Nº Matrícula/SIAPE")
+        with col2:
             medico = st.selectbox("Nome do médico", nomes_medicos, index=None,
                                    placeholder="Selecione o médico")
             categoria = st.radio(
@@ -46,8 +46,13 @@ if pagina == "📝 Lançamento Diário":
                 ["Discente (não assistido)", "Discente assistido (Prape)", "Servidor"],
                 horizontal=False,
             )
+            consulta = st.radio(
+                "Tipo de consulta",
+                ["Primeira consulta", "Retorno", "Acompanhamento/tratamento"],
+                horizontal=False,
+            )
 
-        enviado = st.form_submit_button("💾 Salvar na Base", use_container_width=True)
+        enviado = st.form_submit_button("💾 Salvar na Base", width='stretch')
 
     if enviado:
         if not data_atendimento:
@@ -61,7 +66,7 @@ if pagina == "📝 Lançamento Diário":
                 "Servidor": "servidor",
             }[categoria]
             db.salvar_atendimento(nr_cras, data_atendimento, medico, turno, usuario,
-                                   nr_matricula, categoria_key)
+                                   nr_matricula, categoria_key, consulta)
             st.success("Registro salvo com sucesso!")
 
     st.divider()
@@ -100,7 +105,7 @@ if pagina == "📝 Lançamento Diário":
                 ),
             },
             disabled=["Médico", "Turno", "Nome do usuário", "Matrícula"],
-            use_container_width=True,
+            width='stretch',
             key="editor_atendimentos_dia",
         )
 
@@ -117,6 +122,18 @@ if pagina == "📝 Lançamento Diário":
                 db.atualizar_status_atendimento(ficha_id, novo_status)
             st.toast(f"{len(mudancas)} atendimento(s) atualizado(s).", icon="✅")
             st.rerun()
+
+        with st.expander("🗑️ Excluir um lançamento (feito por engano, duplicado, etc.)"):
+            opcoes = {
+                f"{r['nome_usuario'] or '(sem nome)'} — {r['medico']} — {r['turno']} — {r['status']}": r["id"]
+                for r in registros
+            }
+            escolha = st.selectbox("Lançamento a excluir", list(opcoes.keys()), index=None,
+                                    placeholder="Selecione", key="lancamento_excluir")
+            if st.button("Excluir definitivamente", type="secondary") and escolha:
+                db.excluir_atendimento(opcoes[escolha])
+                st.success("Lançamento excluído.")
+                st.rerun()
 
     st.caption(f"Última atualização: {pd.Timestamp.now().strftime('%d/%m/%Y %H:%M')}")
 
@@ -137,6 +154,14 @@ elif pagina == "🖨️ Mapa de Atendimento":
         data_sel = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
     with col3:
         turno_sel = st.selectbox("Turno", ["Ambos", "MANHÃ", "TARDE"])
+
+    chefe_setor = st.text_input(
+        "Nome do Chefe de Setor (para a assinatura no PDF)",
+        value=db.get_config("chefe_setor", ""),
+        help="Fica salvo para os próximos mapas gerados.",
+    )
+    if chefe_setor != db.get_config("chefe_setor", ""):
+        db.set_config("chefe_setor", chefe_setor)
 
     # Sempre busca na hora, direto do banco — sem guardar em cache entre
     # páginas, para nunca mostrar um resultado desatualizado depois de
@@ -160,10 +185,11 @@ elif pagina == "🖨️ Mapa de Atendimento":
                       "'Lançamento Diário'.")
         else:
             df = pd.DataFrame(atendimentos)[
-                ["nr_cras", "nome_usuario", "matricula", "assistido", "servidor"]
+                ["nr_cras", "nome_usuario", "matricula", "consulta", "assistido", "servidor"]
             ]
-            df.columns = ["Nº CRAS", "Nome do usuário", "Matrícula", "Assistido", "Servidor"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            df.columns = ["Nº CRAS", "Nome do usuário", "Matrícula", "Tipo de consulta",
+                           "Assistido", "Servidor"]
+            st.dataframe(df, width='stretch', hide_index=True)
             if n_faltas:
                 st.caption(f"ℹ️ {n_faltas} atendimento(s) desse dia/turno não entraram aqui por "
                           f"estarem marcados como falta — ajuste em 'Lançamento Diário'.")
@@ -176,7 +202,8 @@ elif pagina == "🖨️ Mapa de Atendimento":
         col_c.metric("Discentes assistidos", assistidos)
 
         pdf_buffer = gerar_pdf_mapa(medico_sel, especialidade, data_sel, turno_sel,
-                                     atendimentos, total_faltosos=n_faltas)
+                                     atendimentos, total_faltosos=n_faltas,
+                                     chefe_setor=chefe_setor)
         st.download_button(
             "🖨️ Baixar Mapa em PDF", data=pdf_buffer,
             file_name=f"Mapa_{medico_sel}_{data_sel.strftime('%d-%m-%Y')}.pdf",
@@ -190,14 +217,16 @@ elif pagina == "🖨️ Mapa de Atendimento":
 # =====================================================================
 elif pagina == "📊 Dashboard":
     st.title("Dashboard")
-    st.caption("Inclui o histórico real importado da planilha original (Base 2025 - 2026), "
-               "mais os lançamentos feitos aqui no app.")
+    st.caption("Os mesmos 10 gráficos da planilha original (aba 'Dinâmicas'), calculados a partir "
+               "do histórico real + lançamentos feitos aqui no app.")
 
     base_df = db.get_base_df()
 
     if base_df.empty:
         st.info("Ainda não há atendimentos registrados. Use a página de Lançamento Diário.")
     else:
+        import plotly.express as px
+
         base_df["data"] = pd.to_datetime(base_df["data"])
 
         col1, col2, col3, col4 = st.columns(4)
@@ -210,27 +239,106 @@ elif pagina == "📊 Dashboard":
 
         anos = sorted(base_df["data"].dt.year.unique(), reverse=True)
         ano_sel = st.selectbox("Filtrar por ano", ["Todos"] + [str(a) for a in anos])
-        df_filtrado = base_df if ano_sel == "Todos" else base_df[base_df["data"].dt.year == int(ano_sel)]
+        df = base_df if ano_sel == "Todos" else base_df[base_df["data"].dt.year == int(ano_sel)]
+
+        CORES = ["#2E5E4E", "#4F8A6E", "#8FBF9F", "#C9A227", "#B5533C"]
+
+        # 1) Metas x Atendimentos por Médico
+        st.subheader("Metas/Atendimentos por Médico")
+        por_med = df.groupby("medico").agg(
+            Atendidos=("total_atendidos", "sum"), Meta=("meta", "max")
+        ).reset_index().sort_values("Atendidos", ascending=False)
+        por_med["Meta"] = por_med["Meta"].fillna(0)
+        fig1 = px.bar(por_med, x="medico", y=["Atendidos", "Meta"], barmode="group",
+                      labels={"medico": "", "value": "Quantidade", "variable": ""},
+                      color_discrete_sequence=CORES)
+        st.plotly_chart(fig1, width='stretch')
 
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Atendimentos por especialidade")
-            por_esp = df_filtrado.groupby("especialidade")["total_atendidos"].sum().sort_values(ascending=False)
-            st.bar_chart(por_esp)
+            # 2) Metas x Atendimentos por Especialidade
+            st.subheader("Metas/Atendimentos por Especialidade")
+            por_esp = df.groupby("especialidade").agg(
+                Atendidos=("total_atendidos", "sum"), Meta=("meta", "sum")
+            ).reset_index().sort_values("Atendidos", ascending=False)
+            fig2 = px.bar(por_esp, x="especialidade", y=["Atendidos", "Meta"], barmode="group",
+                          labels={"especialidade": "", "value": "Quantidade", "variable": ""},
+                          color_discrete_sequence=CORES)
+            st.plotly_chart(fig2, width='stretch')
         with c2:
-            st.subheader("Atendimentos por médico")
-            por_medico = df_filtrado.groupby("medico")["total_atendidos"].sum().sort_values(ascending=False)
-            st.bar_chart(por_medico)
+            # 3) Categoria dos Atendimentos (pizza)
+            st.subheader("Categoria dos Atendimentos")
+            cat = pd.DataFrame({
+                "Categoria": ["Servidor", "Discente", "Discente assistido (Prape)"],
+                "Total": [df["atendidos_servidores"].sum(), df["discentes_naoassistidos"].sum(),
+                          df["discentes_assistidos"].sum()],
+            })
+            fig3 = px.pie(cat, names="Categoria", values="Total", color_discrete_sequence=CORES)
+            st.plotly_chart(fig3, width='stretch')
 
-        st.subheader("Atendimentos por mês")
-        df_filtrado = df_filtrado.copy()
-        df_filtrado["ano_mes"] = df_filtrado["data"].dt.to_period("M").astype(str)
-        por_mes = df_filtrado.groupby("ano_mes")["total_atendidos"].sum()
-        st.line_chart(por_mes)
+        # 4) Classificação de Desempenho por Médico
+        st.subheader("Classificação de Desempenho por Médico")
+        desemp = df[df["classif_desempenho"].notna()].groupby(
+            ["medico", "classif_desempenho"]).size().reset_index(name="Dias")
+        fig4 = px.bar(desemp, x="medico", y="Dias", color="classif_desempenho", barmode="stack",
+                      labels={"medico": "", "classif_desempenho": ""},
+                      color_discrete_sequence=CORES)
+        st.plotly_chart(fig4, width='stretch')
+
+        c3, c4 = st.columns(2)
+        with c3:
+            # 5) Ano x Atendimentos
+            st.subheader("Ano x Atendimentos")
+            por_ano = base_df.groupby(base_df["data"].dt.year)["total_atendidos"].sum().reset_index()
+            por_ano.columns = ["Ano", "Atendidos"]
+            fig5 = px.bar(por_ano, x="Ano", y="Atendidos", color_discrete_sequence=CORES)
+            fig5.update_xaxes(type="category")
+            st.plotly_chart(fig5, width='stretch')
+        with c4:
+            # 6) Meses x Atendimentos
+            st.subheader("Meses x Atendimentos")
+            por_mes = df.groupby("mes")["total_atendidos"].sum().reindex(db.NOMES_MES).dropna().reset_index()
+            por_mes.columns = ["Mês", "Atendidos"]
+            fig6 = px.bar(por_mes, x="Mês", y="Atendidos", color_discrete_sequence=CORES)
+            st.plotly_chart(fig6, width='stretch')
+
+        # 7) Médico x Atendimentos
+        st.subheader("Médico x Atendimentos")
+        med_at = df.groupby("medico")["total_atendidos"].sum().sort_values(ascending=False).reset_index()
+        med_at.columns = ["Médico", "Atendidos"]
+        fig7 = px.bar(med_at, x="Médico", y="Atendidos", color_discrete_sequence=CORES)
+        st.plotly_chart(fig7, width='stretch')
+
+        c5, c6 = st.columns(2)
+        with c5:
+            # 8) Categoria das Faltas Profissionais (pizza)
+            st.subheader("Categoria das Faltas Profissionais")
+            faltas_map = {0: "Presença", 1: "Ausência", 2: "Férias/Feriado"}
+            fp = df[df["falta_profissional"].notna()].copy()
+            fp["categoria"] = fp["falta_profissional"].map(faltas_map)
+            fp_cont = fp.groupby("categoria").size().reset_index(name="Total")
+            fig8 = px.pie(fp_cont, names="categoria", values="Total", color_discrete_sequence=CORES)
+            st.plotly_chart(fig8, width='stretch')
+        with c6:
+            # 10) Categoria do Desempenho (pizza) — geral, não por médico
+            st.subheader("Categoria do Desempenho")
+            desemp_geral = df.groupby("classif_desempenho").size().reset_index(name="Total")
+            desemp_geral = desemp_geral[desemp_geral["classif_desempenho"].notna()]
+            fig10 = px.pie(desemp_geral, names="classif_desempenho", values="Total",
+                           color_discrete_sequence=CORES)
+            st.plotly_chart(fig10, width='stretch')
+
+        # 9) Médicos x Faltas Profissionais
+        st.subheader("Médicos x Faltas Profissionais")
+        fp_med = df[df["falta_profissional"].notna()].copy()
+        fp_med["categoria"] = fp_med["falta_profissional"].map(faltas_map)
+        fp_med_cont = fp_med.groupby(["medico", "categoria"]).size().reset_index(name="Dias")
+        fig9 = px.bar(fp_med_cont, x="medico", y="Dias", color="categoria", barmode="stack",
+                      labels={"medico": "", "categoria": ""}, color_discrete_sequence=CORES)
+        st.plotly_chart(fig9, width='stretch')
 
         with st.expander("Ver tabela completa do histórico"):
-            st.dataframe(df_filtrado.sort_values("data", ascending=False),
-                         use_container_width=True, hide_index=True)
+            st.dataframe(df.sort_values("data", ascending=False), width='stretch', hide_index=True)
 
 # =====================================================================
 # PÁGINA 4 — Base de Dados (equivalente às abas "Ficha" e "Base")
@@ -243,14 +351,14 @@ elif pagina == "📁 Base de Dados":
 
     with aba[0]:
         df = db.get_ficha_df()
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width='stretch', hide_index=True)
         if not df.empty:
             st.download_button("⬇️ Baixar CSV", df.to_csv(index=False).encode("utf-8"),
                                 "ficha.csv", "text/csv")
 
     with aba[1]:
         df = db.get_base_df()
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width='stretch', hide_index=True)
         if not df.empty:
             st.download_button("⬇️ Baixar CSV", df.to_csv(index=False).encode("utf-8"),
                                 "base.csv", "text/csv")
@@ -280,7 +388,7 @@ elif pagina == "📁 Base de Dados":
         st.divider()
         st.subheader("Médicos cadastrados")
         df_medicos = pd.DataFrame(db.listar_medicos())
-        st.dataframe(df_medicos, use_container_width=True, hide_index=True)
+        st.dataframe(df_medicos, width='stretch', hide_index=True)
 
         with st.expander("🗑️ Remover um médico da lista"):
             st.caption("Isso só tira o nome das opções do formulário — atendimentos já "
