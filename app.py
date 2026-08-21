@@ -220,16 +220,17 @@ if pagina == "📝 Lançamento Diário":
                                           key="data_dia")
             with cold3:
                 turno_dia = st.selectbox("Turno", ["MANHÃ", "TARDE"], key="turno_dia")
-            veio = st.radio("O profissional veio?", ["Sim", "Não"], horizontal=True)
+            veio = st.radio("Situação do profissional", ["Presença", "Falta", "Feriado"],
+                            horizontal=True)
             enviar_dia = st.form_submit_button("Registrar")
 
         if enviar_dia:
             if not medico_dia:
                 st.error("Selecione o médico.")
             else:
-                db.registrar_dia(data_dia, medico_dia, turno_dia, veio == "Sim")
+                db.registrar_dia(data_dia, medico_dia, turno_dia, veio)
                 st.success(f"Dia registrado: {medico_dia} — {data_dia.strftime('%d/%m/%Y')} "
-                           f"({turno_dia}) — {'veio' if veio == 'Sim' else 'faltou'}.")
+                           f"({turno_dia}) — {veio}.")
 
     # -----------------------------------------------------------------
     # Atendimentos do dia — revisar e marcar status (Realizado / Falta)
@@ -254,8 +255,11 @@ if pagina == "📝 Lançamento Diário":
         st.info("Nenhum atendimento lançado para esse dia.")
     else:
         df_rev = pd.DataFrame(registros).set_index("id")
-        df_rev_exibir = df_rev[["medico", "turno", "nome_usuario", "matricula", "status"]].copy()
-        df_rev_exibir.columns = ["Médico", "Turno", "Nome do usuário", "Matrícula", "Status"]
+        df_rev["nome_usuario"] = df_rev["nome_usuario"].fillna("").replace(
+            "", "(sem paciente — marcador de presença)")
+        df_rev["motivo"] = df_rev["motivo"].fillna("")
+        df_rev_exibir = df_rev[["medico", "turno", "nome_usuario", "matricula", "motivo", "status"]].copy()
+        df_rev_exibir.columns = ["Médico", "Turno", "Nome do usuário", "Matrícula", "Motivo", "Status"]
 
         editado = st.data_editor(
             df_rev_exibir,
@@ -264,7 +268,7 @@ if pagina == "📝 Lançamento Diário":
                     "Status", options=db.STATUS_OPCOES, required=True
                 ),
             },
-            disabled=["Médico", "Turno", "Nome do usuário", "Matrícula"],
+            disabled=["Médico", "Turno", "Nome do usuário", "Matrícula", "Motivo"],
             width='stretch',
             key="editor_atendimentos_dia",
         )

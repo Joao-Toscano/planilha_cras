@@ -74,6 +74,7 @@ def init_db():
             servidor TEXT,
             consulta TEXT,
             status TEXT DEFAULT 'Realizado',
+            motivo TEXT,
             criado_em TEXT
         )
     """)
@@ -152,6 +153,10 @@ def init_db():
     if "consulta" not in colunas_ficha:
         cur.execute("ALTER TABLE ficha ADD COLUMN consulta TEXT")
         avisos.append("Coluna 'consulta' adicionada à tabela 'ficha' (banco de uma versão anterior).")
+        conn.commit()
+    if "motivo" not in colunas_ficha:
+        cur.execute("ALTER TABLE ficha ADD COLUMN motivo TEXT")
+        avisos.append("Coluna 'motivo' adicionada à tabela 'ficha' (banco de uma versão anterior).")
         conn.commit()
 
     # Sincroniza médicos: roda sempre (não só na primeira vez), usando
@@ -328,29 +333,32 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
     conn.close()
 
 
-def registrar_dia(data_ref: date, medico: str, turno: str, veio: bool):
+def registrar_dia(data_ref: date, medico: str, turno: str, motivo: str):
     """
-    Registra um dia/turno só com médico + presença ou falta, sem dados de
-    paciente — para marcar rapidamente 'esse profissional veio' ou 'faltou'
-    nesse turno. Aparece na revisão do dia (com nome em branco) e pode ter o
-    status trocado depois, igual a qualquer outro lançamento.
+    Registra um dia/turno só com médico + situação, sem dados de paciente —
+    para marcar rapidamente a presença do profissional nesse turno.
+    motivo: 'Presença' | 'Falta' | 'Feriado'
+    Aparece na revisão do dia (com nome em branco) e o status pode ser
+    trocado depois, igual a qualquer outro lançamento.
     Não soma em nenhuma categoria de atendimento (Servidor/Discente/etc) —
-    só marca presença/falta do profissional.
+    só marca a situação do profissional, e alimenta o código de falta
+    profissional (0/1/2) usado nos gráficos do Dashboard.
     """
     med = buscar_medico(medico)
     especialidade = med["especialidade"] if med else ""
     cod_medico = med["cod"] if med else ""
-    status = "Realizado" if veio else "Falta do profissional"
+    status = "Realizado" if motivo == "Presença" else "Falta do profissional"
+    codigo_falta = {"Presença": 0, "Falta": 1, "Feriado": 2}[motivo]
 
     conn = get_conn()
     cur = conn.cursor()
 
     cur.execute("""
         INSERT INTO ficha (data, mes, dia_semana, turno, medico, especialidade,
-                            assistido, servidor, status, criado_em)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+                            assistido, servidor, status, motivo, criado_em)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref), turno,
-          medico, especialidade, "Não", "Não", status,
+          medico, especialidade, "Não", "Não", status, motivo,
           datetime.now().isoformat(timespec="seconds")))
 
     meta = med["meta"] if med else None
@@ -362,12 +370,18 @@ def registrar_dia(data_ref: date, medico: str, turno: str, veio: bool):
     if existente is None:
         cur.execute("""
             INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
-                               faltosos, meta)
-            VALUES (?,?,?,?,?,?,?,?)
+                               faltosos, falta_profissional, meta)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref),
-              medico, especialidade, cod_medico, 0 if veio else 1, meta))
-    elif not veio:
-        cur.execute("UPDATE base SET faltosos = faltosos + 1 WHERE id = ?", (existente["id"],))
+              medico, especialidade, cod_medico, 0 if motivo == "Presença" else 1,
+              codigo_falta, meta))
+    else:
+        if motivo != "Presença":
+            cur.execute("UPDATE base SET faltosos = faltosos + 1, falta_profissional = ? WHERE id = ?",
+                        (codigo_falta, existente["id"]))
+        else:
+            cur.execute("UPDATE base SET falta_profissional = ? WHERE id = ?",
+                        (codigo_falta, existente["id"]))
 
     conn.commit()
     conn.close()
