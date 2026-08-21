@@ -1,37 +1,122 @@
 import streamlit as st
 from datetime import date
+from pathlib import Path
 import pandas as pd
 
 import db
 from pdf_mapa import gerar_pdf_mapa
 
+ASSETS = Path(__file__).parent / "assets"
 
-def dashboard_liberado():
-    """
-    Verifica a senha do Dashboard, se uma tiver sido configurada em
-    Base de Dados > ⚙️ Configurações. Sem senha definida, o acesso fica
-    livre (comportamento padrão).
-    """
-    senha_definida = db.get_config("dashboard_senha", "")
-    if not senha_definida:
-        return True
-    if st.session_state.get("dashboard_ok"):
-        return True
+PAGINAS_ADMIN = ["📝 Lançamento Diário", "🖨️ Mapa de Atendimento", "📊 Dashboard", "📁 Base de Dados"]
+PAGINAS_RECEPCAO = ["📝 Lançamento Diário", "🖨️ Mapa de Atendimento"]
 
-    st.title("📊 Dashboard")
-    st.subheader("🔒 Esta página é protegida por senha")
-    senha_input = st.text_input("Digite a senha", type="password", key="senha_dashboard_input")
-    if st.button("Entrar"):
-        if senha_input == senha_definida:
-            st.session_state["dashboard_ok"] = True
-            st.rerun()
+USUARIOS = {
+    "admin": {"chave_senha": "senha_admin", "perfil": "admin", "rotulo": "Administrador"},
+    "recepcao": {"chave_senha": "senha_recepcao", "perfil": "recepcao", "rotulo": "Recepção"},
+}
+
+
+import base64
+
+
+def _img_b64(nome_arquivo):
+    return base64.b64encode((ASSETS / nome_arquivo).read_bytes()).decode()
+
+
+def mostrar_logo_principal(width=170):
+    st.markdown(
+        f"<div style='text-align:center;'>"
+        f"<img src='data:image/png;base64,{_img_b64('logo_cras_ufpb.png')}' width='{width}'>"
+        f"</div>", unsafe_allow_html=True
+    )
+
+
+def mostrar_rodape_gesp():
+    st.divider()
+    st.markdown(
+        "<p style='text-align:center;color:gray;font-size:0.85rem;'>Desenvolvido por</p>"
+        f"<div style='text-align:center;'>"
+        f"<img src='data:image/png;base64,{_img_b64('logo_gesp.png')}' width='90'>"
+        f"</div>", unsafe_allow_html=True
+    )
+
+
+def tela_configuracao_inicial():
+    mostrar_logo_principal()
+    st.markdown("<h1 style='text-align:center;'>Sistema de Atendimento CRAS</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:gray;'>Primeira configuração</p>", unsafe_allow_html=True)
+    st.write("")
+    st.write("Antes de começar a usar o sistema, defina as senhas de acesso para os dois perfis "
+             "(usuários **admin** e **recepcao**).")
+    with st.form("form_setup"):
+        st.subheader("Administrador  (usuário: admin)")
+        st.caption("Acesso total: Lançamento, Mapa, Dashboard e Base de Dados.")
+        senha_admin = st.text_input("Senha do Administrador", type="password")
+        confirmar_admin = st.text_input("Confirme a senha do Administrador", type="password")
+        st.subheader("Recepção  (usuário: recepcao)")
+        st.caption("Acesso a Lançamento Diário e Mapa de Atendimento.")
+        senha_recepcao = st.text_input("Senha da Recepção", type="password")
+        confirmar_recepcao = st.text_input("Confirme a senha da Recepção", type="password")
+        enviar = st.form_submit_button("Salvar e continuar", width='stretch')
+
+    if enviar:
+        if not senha_admin or not senha_recepcao:
+            st.error("Preencha as duas senhas.")
+        elif senha_admin != confirmar_admin or senha_recepcao != confirmar_recepcao:
+            st.error("A confirmação não coincide com a senha digitada.")
         else:
-            st.error("Senha incorreta.")
-    return False
+            db.set_config("senha_admin", senha_admin)
+            db.set_config("senha_recepcao", senha_recepcao)
+            st.success("Senhas definidas! Redirecionando para o login...")
+            st.rerun()
+
+    mostrar_rodape_gesp()
+
+
+def tela_login():
+    mostrar_logo_principal()
+    st.markdown("<h1 style='text-align:center;'>Sistema de Atendimento CRAS</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align:center;color:gray;'>Faça login para continuar</p>",
+                unsafe_allow_html=True)
+    st.write("")
+
+    col_form, col_info = st.columns(2)
+    with col_form:
+        usuario = st.text_input("Usuário", key="login_usuario", placeholder="admin ou recepcao")
+        senha = st.text_input("Senha", type="password", key="login_senha")
+        if st.button("Entrar", width='stretch'):
+            u = USUARIOS.get(usuario.strip().lower())
+            if u and senha and senha == db.get_config(u["chave_senha"], None):
+                st.session_state["perfil"] = u["perfil"]
+                st.rerun()
+            else:
+                st.error("Usuário ou senha incorretos.")
+    with col_info:
+        st.info(
+            "**Perfis disponíveis:**\n\n"
+            "- **admin** — acesso total (Lançamento, Mapa, Dashboard, Base de Dados)\n"
+            "- **recepcao** — acesso a Lançamento Diário e Mapa de Atendimento\n\n"
+            "Esqueceu a senha? Peça para um Administrador redefinir em "
+            "**Base de Dados > ⚙️ Configurações**."
+        )
+
+    mostrar_rodape_gesp()
 
 
 st.set_page_config(page_title="CRAS - Sistema de Atendimento", page_icon="🏥", layout="wide")
 resultado_init = db.init_db()
+
+# Primeiro acesso: força a definição das senhas antes de liberar qualquer página
+if not db.get_config("senha_admin") or not db.get_config("senha_recepcao"):
+    tela_configuracao_inicial()
+    st.stop()
+
+# Login: exige usuário + senha antes de mostrar qualquer página
+if "perfil" not in st.session_state:
+    tela_login()
+    st.stop()
+
 if resultado_init["erros"]:
     with st.sidebar:
         st.error("⚠️ Problemas ao carregar os dados — veja 'Base de Dados > Diagnóstico'.")
@@ -39,11 +124,34 @@ elif resultado_init["info"]:
     with st.sidebar:
         st.info("ℹ️ Alguns dados foram completados automaticamente — veja 'Base de Dados > Diagnóstico'.")
 
+with st.sidebar:
+    st.markdown(
+        f"<div style='text-align:center;'>"
+        f"<img src='data:image/png;base64,{_img_b64('logo_cras_ufpb.png')}' width='120'>"
+        f"</div>", unsafe_allow_html=True
+    )
+
 st.sidebar.title("🏥 CRAS")
-pagina = st.sidebar.radio(
-    "Navegação",
-    ["📝 Lançamento Diário", "🖨️ Mapa de Atendimento", "📊 Dashboard", "📁 Base de Dados"],
-)
+
+opcoes_pagina = PAGINAS_ADMIN if st.session_state["perfil"] == "admin" else PAGINAS_RECEPCAO
+pagina = st.sidebar.radio("Navegação", opcoes_pagina)
+
+st.sidebar.divider()
+rotulo_perfil = "Administrador" if st.session_state["perfil"] == "admin" else "Recepção"
+st.sidebar.caption(f"Conectado como **{rotulo_perfil}**")
+if st.sidebar.button("🚪 Sair"):
+    del st.session_state["perfil"]
+    st.rerun()
+
+with st.sidebar:
+    st.divider()
+    st.markdown(
+        "<p style='text-align:center;color:gray;font-size:0.8rem;margin-bottom:4px;'>"
+        "Desenvolvido por</p>"
+        f"<div style='text-align:center;'>"
+        f"<img src='data:image/png;base64,{_img_b64('logo_gesp.png')}' width='60'>"
+        f"</div>", unsafe_allow_html=True
+    )
 
 # =====================================================================
 # PÁGINA 1 — Lançamento Diário (equivalente à aba "Início")
@@ -241,8 +349,6 @@ elif pagina == "🖨️ Mapa de Atendimento":
 # PÁGINA 3 — Dashboard
 # =====================================================================
 elif pagina == "📊 Dashboard":
-    if not dashboard_liberado():
-        st.stop()
     st.title("Dashboard")
     st.caption("Os mesmos 10 gráficos da planilha original (aba 'Dinâmicas'), calculados a partir "
                "do histórico real + lançamentos feitos aqui no app.")
@@ -429,30 +535,40 @@ elif pagina == "📁 Base de Dados":
                 st.rerun()
 
     with aba[3]:
-        st.subheader("🔒 Senha do Dashboard")
-        senha_atual = db.get_config("dashboard_senha", "")
-        if senha_atual:
-            st.success("O Dashboard está protegido por senha.")
-        else:
-            st.info("O Dashboard está com acesso livre (sem senha definida).")
+        st.subheader("🔒 Senhas de acesso")
+        st.caption("Trocar a senha de um perfil desconecta imediatamente qualquer sessão aberta "
+                   "com a senha antiga (é preciso entrar de novo).")
 
-        with st.form("form_senha_dashboard"):
-            nova_senha = st.text_input("Nova senha (deixe em branco para remover a proteção)",
-                                        type="password")
-            confirmar = st.text_input("Confirme a nova senha", type="password")
-            salvar_senha = st.form_submit_button("Salvar")
-
-        if salvar_senha:
-            if nova_senha != confirmar:
-                st.error("As senhas não coincidem.")
-            else:
-                db.set_config("dashboard_senha", nova_senha)
-                st.session_state.pop("dashboard_ok", None)
-                if nova_senha:
-                    st.success("Senha definida! O Dashboard agora pede senha para abrir.")
+        col_a, col_r = st.columns(2)
+        with col_a:
+            st.markdown("**Administrador**")
+            with st.form("form_senha_admin"):
+                nova_admin = st.text_input("Nova senha", type="password", key="nova_senha_admin")
+                confirmar_admin = st.text_input("Confirme", type="password", key="conf_senha_admin")
+                salvar_admin = st.form_submit_button("Salvar senha do Administrador")
+            if salvar_admin:
+                if not nova_admin:
+                    st.error("A senha não pode ficar em branco.")
+                elif nova_admin != confirmar_admin:
+                    st.error("As senhas não coincidem.")
                 else:
-                    st.success("Proteção removida — o Dashboard ficou com acesso livre.")
-                st.rerun()
+                    db.set_config("senha_admin", nova_admin)
+                    st.success("Senha do Administrador atualizada.")
+
+        with col_r:
+            st.markdown("**Recepção**")
+            with st.form("form_senha_recepcao"):
+                nova_recepcao = st.text_input("Nova senha", type="password", key="nova_senha_recepcao")
+                confirmar_recepcao = st.text_input("Confirme", type="password", key="conf_senha_recepcao")
+                salvar_recepcao = st.form_submit_button("Salvar senha da Recepção")
+            if salvar_recepcao:
+                if not nova_recepcao:
+                    st.error("A senha não pode ficar em branco.")
+                elif nova_recepcao != confirmar_recepcao:
+                    st.error("As senhas não coincidem.")
+                else:
+                    db.set_config("senha_recepcao", nova_recepcao)
+                    st.success("Senha da Recepção atualizada.")
 
         st.divider()
         st.subheader("Nome do Chefe de Setor")

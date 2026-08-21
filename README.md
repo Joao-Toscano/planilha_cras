@@ -71,13 +71,29 @@ quiser publicar para uso contínuo da equipe.
   app usa o nome como identificador único no formulário, mantive só o primeiro
   registro. Se as duas entradas eram intencionais (ex: dois turnos/contratos
   diferentes), me avise que ajusto para diferenciá-las (ex: por código).
-- **Sem senha para o Dashboard**: no arquivo original a aba Dashboard era
-  protegida por uma senha simples via VBA (fácil de contornar, já que ficava
-  visível no código-fonte). Se você precisa de controle de acesso de verdade
-  aqui, o caminho certo é usar `st.secrets` + autenticação (posso implementar
-  isso também).
+
+## Login e perfis de acesso
+O app tem dois perfis, cada um com sua própria senha:
+- **Recepção**: acesso a Lançamento Diário e Mapa de Atendimento.
+- **Administrador**: acesso total (também Dashboard e Base de Dados).
+
+Na primeira vez que alguém abrir o app, ele pede para definir as duas senhas
+antes de liberar qualquer página. Depois disso, é só escolher o perfil e
+digitar a senha na tela de login.
+
+Para trocar qualquer uma das duas senhas depois, entre como Administrador e
+vá em **Base de Dados > ⚙️ Configurações**.
+
+⚠️ Assim como a senha do Chefe de Setor e demais configurações, essas senhas
+ficam salvas sem criptografia no banco local (`cras.db`) — é uma proteção
+simples contra acesso casual, não um controle de acesso robusto. Se for
+publicar o app na internet para várias pessoas acessarem, vale considerar algo
+mais forte (ex: `st.secrets` + um provedor de autenticação de verdade).
 
 ## Testado
 - App sobe e responde (HTTP 200) sem erros.
 - Fluxo completo testado de ponta a ponta: cadastro de atendimento → gravação
+  no banco → mapa em PDF → dashboard.
+- Login testado nos dois perfis (Recepção e Administrador), incluindo senha
+  errada, troca de senha, e restrição de páginas por perfil.
   no banco → agregação por dia/médico → geração do PDF do mapa.
