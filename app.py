@@ -205,6 +205,33 @@ if pagina == "📝 Lançamento Diário":
     st.divider()
 
     # -----------------------------------------------------------------
+    # Adicionar dia só com médico + turno (sem dados de paciente)
+    # -----------------------------------------------------------------
+    with st.expander("➕ Adicionar dia (só médico e turno) — marcar se ele veio ou não"):
+        st.caption("Use aqui quando quiser só registrar presença/falta do profissional num dia/"
+                   "turno, sem lançar nenhum paciente específico.")
+        with st.form("form_dia_medico", clear_on_submit=True):
+            cold1, cold2, cold3 = st.columns(3)
+            with cold1:
+                medico_dia = st.selectbox("Médico", nomes_medicos, index=None,
+                                           placeholder="Selecione o médico", key="medico_dia")
+            with cold2:
+                data_dia = st.date_input("Data", value=date.today(), format="DD/MM/YYYY",
+                                          key="data_dia")
+            with cold3:
+                turno_dia = st.selectbox("Turno", ["MANHÃ", "TARDE"], key="turno_dia")
+            veio = st.radio("O profissional veio?", ["Sim", "Não"], horizontal=True)
+            enviar_dia = st.form_submit_button("Registrar")
+
+        if enviar_dia:
+            if not medico_dia:
+                st.error("Selecione o médico.")
+            else:
+                db.registrar_dia(data_dia, medico_dia, turno_dia, veio == "Sim")
+                st.success(f"Dia registrado: {medico_dia} — {data_dia.strftime('%d/%m/%Y')} "
+                           f"({turno_dia}) — {'veio' if veio == 'Sim' else 'faltou'}.")
+
+    # -----------------------------------------------------------------
     # Atendimentos do dia — revisar e marcar status (Realizado / Falta)
     # -----------------------------------------------------------------
     st.subheader("📋 Atendimentos do dia")

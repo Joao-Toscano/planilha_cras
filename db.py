@@ -328,6 +328,51 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
     conn.close()
 
 
+def registrar_dia(data_ref: date, medico: str, turno: str, veio: bool):
+    """
+    Registra um dia/turno só com médico + presença ou falta, sem dados de
+    paciente — para marcar rapidamente 'esse profissional veio' ou 'faltou'
+    nesse turno. Aparece na revisão do dia (com nome em branco) e pode ter o
+    status trocado depois, igual a qualquer outro lançamento.
+    Não soma em nenhuma categoria de atendimento (Servidor/Discente/etc) —
+    só marca presença/falta do profissional.
+    """
+    med = buscar_medico(medico)
+    especialidade = med["especialidade"] if med else ""
+    cod_medico = med["cod"] if med else ""
+    status = "Realizado" if veio else "Falta do profissional"
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO ficha (data, mes, dia_semana, turno, medico, especialidade,
+                            assistido, servidor, status, criado_em)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref), turno,
+          medico, especialidade, "Não", "Não", status,
+          datetime.now().isoformat(timespec="seconds")))
+
+    meta = med["meta"] if med else None
+    existente = cur.execute(
+        "SELECT id FROM base WHERE data = ? AND medico = ?",
+        (data_ref.isoformat(), medico)
+    ).fetchone()
+
+    if existente is None:
+        cur.execute("""
+            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                               faltosos, meta)
+            VALUES (?,?,?,?,?,?,?,?)
+        """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref),
+              medico, especialidade, cod_medico, 0 if veio else 1, meta))
+    elif not veio:
+        cur.execute("UPDATE base SET faltosos = faltosos + 1 WHERE id = ?", (existente["id"],))
+
+    conn.commit()
+    conn.close()
+
+
 STATUS_OPCOES = ["Realizado", "Falta do profissional", "Falta do usuário"]
 
 
@@ -384,24 +429,34 @@ def atualizar_status_atendimento(ficha_id: int, novo_status: str):
     ).fetchone()
 
     if base_row is not None:
-        campo = _campo_categoria(row)
+        sem_paciente = not row.get("nome_usuario")
         era_realizado = status_antigo == "Realizado"
         fica_realizado = novo_status == "Realizado"
 
-        if era_realizado and not fica_realizado:
-            cur.execute(f"""
-                UPDATE base SET {campo} = MAX({campo} - 1, 0),
-                                 total_atendidos = MAX(total_atendidos - 1, 0),
-                                 faltosos = faltosos + 1
-                WHERE id = ?
-            """, (base_row["id"],))
-        elif not era_realizado and fica_realizado:
-            cur.execute(f"""
-                UPDATE base SET {campo} = {campo} + 1,
-                                 total_atendidos = total_atendidos + 1,
-                                 faltosos = MAX(faltosos - 1, 0)
-                WHERE id = ?
-            """, (base_row["id"],))
+        if sem_paciente:
+            # Marcador de presença/falta (sem dados de paciente) — só mexe
+            # em 'faltosos', nunca em total_atendidos nem nas categorias.
+            if era_realizado and not fica_realizado:
+                cur.execute("UPDATE base SET faltosos = faltosos + 1 WHERE id = ?", (base_row["id"],))
+            elif not era_realizado and fica_realizado:
+                cur.execute("UPDATE base SET faltosos = MAX(faltosos - 1, 0) WHERE id = ?",
+                            (base_row["id"],))
+        else:
+            campo = _campo_categoria(row)
+            if era_realizado and not fica_realizado:
+                cur.execute(f"""
+                    UPDATE base SET {campo} = MAX({campo} - 1, 0),
+                                     total_atendidos = MAX(total_atendidos - 1, 0),
+                                     faltosos = faltosos + 1
+                    WHERE id = ?
+                """, (base_row["id"],))
+            elif not era_realizado and fica_realizado:
+                cur.execute(f"""
+                    UPDATE base SET {campo} = {campo} + 1,
+                                     total_atendidos = total_atendidos + 1,
+                                     faltosos = MAX(faltosos - 1, 0)
+                    WHERE id = ?
+                """, (base_row["id"],))
         # se trocou entre dois motivos de falta diferentes, os totais não mudam
 
     conn.commit()
@@ -445,12 +500,14 @@ def excluir_atendimento(ficha_id: int):
 
     if base_row is not None:
         if row["status"] == "Realizado":
-            campo = _campo_categoria(row)
-            cur.execute(f"""
-                UPDATE base SET {campo} = MAX({campo} - 1, 0),
-                                 total_atendidos = MAX(total_atendidos - 1, 0)
-                WHERE id = ?
-            """, (base_row["id"],))
+            if row.get("nome_usuario"):
+                campo = _campo_categoria(row)
+                cur.execute(f"""
+                    UPDATE base SET {campo} = MAX({campo} - 1, 0),
+                                     total_atendidos = MAX(total_atendidos - 1, 0)
+                    WHERE id = ?
+                """, (base_row["id"],))
+            # marcador de presença sem paciente: nada a decrementar aqui
         else:
             cur.execute("UPDATE base SET faltosos = MAX(faltosos - 1, 0) WHERE id = ?",
                         (base_row["id"],))
@@ -528,9 +585,12 @@ def set_config(chave, valor):
 
 def get_mapa_atendimento(medico: str, data_sel: date, turno: str | None):
     """Retorna a lista de atendimentos REALIZADOS de um médico numa data (e
-    turno opcional) — equivalente à macro GerarMapaPDF, já excluindo faltas."""
+    turno opcional) — equivalente à macro GerarMapaPDF, já excluindo faltas.
+    Marcadores de presença sem paciente (feitos por registrar_dia) não
+    entram aqui, pois não representam um atendimento de fato."""
     conn = get_conn()
-    q = "SELECT * FROM ficha WHERE medico = ? AND data = ? AND status = 'Realizado'"
+    q = ("SELECT * FROM ficha WHERE medico = ? AND data = ? AND status = 'Realizado' "
+         "AND nome_usuario IS NOT NULL AND nome_usuario != ''")
     params = [medico, data_sel.isoformat()]
     if turno:
         q += " AND turno = ?"
