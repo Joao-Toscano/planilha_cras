@@ -410,13 +410,25 @@ elif pagina == "📊 Dashboard":
         # 1) Metas x Atendimentos por Médico
         st.subheader("Metas/Atendimentos por Médico")
         por_med = df.groupby("medico").agg(
-            Atendidos=("total_atendidos", "sum"), Meta=("meta", "max")
+            Atendidos=("total_atendidos", "sum"), Dias=("data", "count")
         ).reset_index().sort_values("Atendidos", ascending=False)
-        por_med["Meta"] = por_med["Meta"].fillna(0)
+
+        # Meta diária de referência por médico: o valor mais frequente entre os
+        # dias com meta > 0 (alguns dias vêm com meta=0 na base histórica —
+        # não usamos esses para não subestimar a meta diária real).
+        meta_diaria = (
+            df[df["meta"] > 0].groupby("medico")["meta"]
+            .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else 0)
+        )
+        por_med["MetaDiaria"] = por_med["medico"].map(meta_diaria).fillna(0)
+        por_med["Meta"] = por_med["Dias"] * por_med["MetaDiaria"]
+
         fig1 = px.bar(por_med, x="medico", y=["Atendidos", "Meta"], barmode="group",
                       labels={"medico": "", "value": "Quantidade", "variable": ""},
+                      hover_data={"Dias": True, "MetaDiaria": True},
                       color_discrete_sequence=CORES)
         st.plotly_chart(fig1, width='stretch')
+        st.caption("Meta = dias contabilizados no período × meta diária do médico.")
 
         c1, c2 = st.columns(2)
         with c1:
