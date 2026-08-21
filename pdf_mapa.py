@@ -113,7 +113,7 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
 
     t = Table(dados, colWidths=col_widths, repeatRows=1)
     t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2E5E4E")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#00622F")),
         ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 1),

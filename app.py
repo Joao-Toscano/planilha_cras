@@ -405,7 +405,7 @@ elif pagina == "📊 Dashboard":
         ano_sel = st.selectbox("Filtrar por ano", ["Todos"] + [str(a) for a in anos])
         df = base_df if ano_sel == "Todos" else base_df[base_df["data"].dt.year == int(ano_sel)]
 
-        CORES = ["#2E5E4E", "#4F8A6E", "#8FBF9F", "#C9A227", "#B5533C"]
+        CORES = ["#00622F", "#3C8659", "#7DAE8C", "#B8D4C2", "#C9A227"]
 
         # 1) Metas x Atendimentos por Médico
         st.subheader("Metas/Atendimentos por Médico")
