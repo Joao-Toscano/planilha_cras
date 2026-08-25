@@ -143,6 +143,10 @@ if st.sidebar.button("🚪 Sair"):
     del st.session_state["perfil"]
     st.rerun()
 
+if st.session_state["perfil"] == "admin" and not db.get_config("ultimo_backup", ""):
+    st.sidebar.warning("💾 Você ainda não baixou nenhum backup. Veja "
+                        "**Base de Dados > ⚙️ Configurações**.")
+
 with st.sidebar:
     st.divider()
     st.markdown(
@@ -578,6 +582,51 @@ elif pagina == "📁 Base de Dados":
                 st.rerun()
 
     with aba[3]:
+        st.subheader("💾 Backup e Restauração")
+        st.warning(
+            "⚠️ Se este app está publicado no Streamlit Community Cloud, o banco de dados "
+            "**pode ser apagado** quando o app dorme (12h sem acesso) e alguém o acorda de "
+            "novo, ou quando você faz um novo push no GitHub. Baixe um backup regularmente "
+            "— principalmente antes de qualquer atualização — e guarde em local seguro "
+            "(Google Drive, e-mail, etc.)."
+        )
+
+        ultimo_backup = db.get_config("ultimo_backup", "")
+        if ultimo_backup:
+            st.caption(f"Último backup baixado: **{ultimo_backup}**")
+        else:
+            st.caption("Nenhum backup baixado ainda nesta instalação.")
+
+        dados_backup = db.gerar_backup_json()
+        nome_arquivo = f"backup_cras_{pd.Timestamp.now().strftime('%Y-%m-%d_%H%M')}.json"
+        if st.download_button("⬇️ Baixar backup completo (.json)", data=dados_backup,
+                               file_name=nome_arquivo, mime="application/json",
+                               width='stretch'):
+            db.set_config("ultimo_backup", pd.Timestamp.now().strftime("%d/%m/%Y %H:%M"))
+            st.success("Backup baixado! Guarde esse arquivo em um local seguro fora do app.")
+
+        with st.expander("⬆️ Restaurar um backup"):
+            st.error(
+                "**Atenção:** restaurar um backup substitui TODOS os dados atuais "
+                "(médicos, atendimentos, senhas) pelos dados do arquivo. Não pode ser desfeito."
+            )
+            arquivo_restaurar = st.file_uploader("Escolha o arquivo de backup (.json)", type="json")
+            confirmar_restauracao = st.checkbox(
+                "Entendo que isso vai apagar os dados atuais e substituir pelos do backup."
+            )
+            if st.button("Restaurar backup", type="secondary", disabled=not arquivo_restaurar):
+                if not confirmar_restauracao:
+                    st.error("Marque a confirmação acima antes de restaurar.")
+                else:
+                    try:
+                        resumo = db.restaurar_backup_json(arquivo_restaurar.read())
+                        st.success(f"Backup restaurado: {resumo}. Você será desconectado — entre de novo.")
+                        del st.session_state["perfil"]
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Não foi possível restaurar: {e}")
+
+        st.divider()
         st.subheader("🔒 Senhas de acesso")
         st.caption("Trocar a senha de um perfil desconecta imediatamente qualquer sessão aberta "
                    "com a senha antiga (é preciso entrar de novo).")
@@ -634,9 +683,14 @@ elif pagina == "📁 Base de Dados":
         if not resultado_init["erros"] and not resultado_init["info"]:
             st.success("Nenhum problema encontrado na inicialização.")
 
-        st.write("**Caminhos verificados:**")
+        st.write("**Conexão e arquivos verificados:**")
+        try:
+            db._get_db_url()
+            status_conexao = "✅ chave 'supabase_db_url' encontrada nas Secrets"
+        except Exception as e:
+            status_conexao = f"❌ {e}"
         st.code(
-            f"Banco de dados:     {db.DB_PATH}  (existe: {db.DB_PATH.exists()})\n"
+            f"Banco de dados (Postgres/Supabase): {status_conexao}\n"
             f"Seed de médicos:    {db.MEDICOS_SEED}  (existe: {db.MEDICOS_SEED.exists()})\n"
             f"Seed do histórico:  {db.BASE_HISTORICO_SEED}  (existe: {db.BASE_HISTORICO_SEED.exists()})",
             language="text"

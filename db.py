@@ -1,14 +1,16 @@
 """
 Camada de dados do app CRAS.
-Usa SQLite (arquivo local cras.db) como substituto das abas
-"Ficha" e "Base" / "Base 2025 - 2026" da planilha original.
+Usa PostgreSQL (Supabase) como substituto das abas "Ficha" e
+"Base" / "Base 2025 - 2026" da planilha original — banco na nuvem, fora do
+disco temporário do Streamlit Cloud, então os dados não somem quando o app
+dorme/reinicia.
 """
-import sqlite3
 import json
+import psycopg2
+import psycopg2.extensions
 from pathlib import Path
 from datetime import date, datetime
 
-DB_PATH = Path(__file__).parent / "cras.db"
 MEDICOS_SEED = Path(__file__).parent / "data" / "medicos.json"
 BASE_HISTORICO_SEED = Path(__file__).parent / "data" / "base_historico.json"
 
@@ -26,10 +28,123 @@ def nome_dia(d: date) -> str:
     return NOMES_DIA[d.weekday()]
 
 
+# ---------------------------------------------------------------------
+# Camada de compatibilidade: o restante deste arquivo foi escrito no
+# estilo do sqlite3 (placeholders "?", conn.execute(...) direto, linhas
+# acessíveis tanto por posição linha[0] quanto por nome linha["coluna"]).
+# Essas classes traduzem isso para o psycopg2/PostgreSQL sem precisar
+# reescrever cada consulta espalhada pelo arquivo.
+# ---------------------------------------------------------------------
+
+class PGRow:
+    """Imita sqlite3.Row: aceita índice numérico (linha[0]) e por nome
+    (linha["coluna"]), e dict(linha) funciona também."""
+    __slots__ = ("_data", "_cols")
+
+    def __init__(self, data, cols):
+        self._data = data
+        self._cols = cols
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._data[key]
+        return self._data[self._cols.index(key)]
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except (ValueError, IndexError):
+            return default
+
+    def keys(self):
+        return self._cols
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __repr__(self):
+        return repr(dict(zip(self._cols, self._data)))
+
+
+class PGCursor:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def _cols(self):
+        return [d[0] for d in self._cur.description] if self._cur.description else []
+
+    def execute(self, sql, params=()):
+        self._cur.execute(sql.replace("?", "%s"), params)
+        return self
+
+    def executemany(self, sql, seq_params):
+        self._cur.executemany(sql.replace("?", "%s"), list(seq_params))
+        return self
+
+    def fetchone(self):
+        row = self._cur.fetchone()
+        return None if row is None else PGRow(row, self._cols())
+
+    def fetchall(self):
+        cols = self._cols()
+        return [PGRow(r, cols) for r in self._cur.fetchall()]
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+    @property
+    def description(self):
+        return self._cur.description
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
+class PGConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return PGCursor(self._conn.cursor())
+
+    def execute(self, sql, params=()):
+        cur = self.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
+
+def _get_db_url():
+    """Lê a connection string do Postgres/Supabase das Secrets do Streamlit
+    (chave 'supabase_db_url'). Levanta um erro claro se não encontrar."""
+    try:
+        import streamlit as st
+        url = st.secrets.get("supabase_db_url")
+    except Exception:
+        url = None
+    if not url:
+        import os
+        url = os.environ.get("SUPABASE_DB_URL")
+    if not url:
+        raise RuntimeError(
+            "Não encontrei a chave 'supabase_db_url' nas Secrets do Streamlit. "
+            "Configure em Settings > Secrets do app (ou em .streamlit/secrets.toml "
+            "localmente) com: supabase_db_url = \"postgresql://...\""
+        )
+    return url
+
+
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    conn = psycopg2.connect(_get_db_url())
+    return PGConnection(conn)
 
 
 def init_db():
@@ -48,7 +163,7 @@ def init_db():
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS medicos (
-            id INTEGER PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             nome TEXT UNIQUE NOT NULL,
             especialidade TEXT,
             cod TEXT,
@@ -59,7 +174,7 @@ def init_db():
     # Ficha: um registro por atendimento (equivalente à aba "Ficha")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS ficha (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             nr_cras TEXT,
             data TEXT NOT NULL,
             mes TEXT,
@@ -83,7 +198,7 @@ def init_db():
     # Base: um registro por (data, médico) - equivalente às abas "Base" / "Base 2025 - 2026"
     cur.execute("""
         CREATE TABLE IF NOT EXISTS base (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             data TEXT NOT NULL,
             mes TEXT,
             dia_semana TEXT,
@@ -127,7 +242,8 @@ def init_db():
         "classif_ocupacao": "TEXT",
         "classif_desempenho": "TEXT",
     }
-    colunas_existentes = {row[1] for row in cur.execute("PRAGMA table_info(base)")}
+    colunas_existentes = {row[0] for row in cur.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'base'")}
     for col, tipo in colunas_esperadas.items():
         if col not in colunas_existentes:
             cur.execute(f"ALTER TABLE base ADD COLUMN {col} {tipo}")
@@ -137,7 +253,8 @@ def init_db():
 
     # Migração da tabela 'ficha': troca o antigo campo tri-state
     # 'falta_profissional' por 'status' (por atendimento individual).
-    colunas_ficha = {row[1] for row in cur.execute("PRAGMA table_info(ficha)")}
+    colunas_ficha = {row[0] for row in cur.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'ficha'")}
     if "status" not in colunas_ficha:
         cur.execute("ALTER TABLE ficha ADD COLUMN status TEXT DEFAULT 'Realizado'")
         if "falta_profissional" in colunas_ficha:
@@ -167,7 +284,8 @@ def init_db():
         medicos = json.loads(MEDICOS_SEED.read_text(encoding="utf-8"))
         antes = cur.execute("SELECT COUNT(*) FROM medicos").fetchone()[0]
         cur.executemany(
-            "INSERT OR IGNORE INTO medicos (id, nome, especialidade, cod, meta) VALUES (?,?,?,?,?)",
+            "INSERT INTO medicos (id, nome, especialidade, cod, meta) VALUES (?,?,?,?,?) "
+            "ON CONFLICT (id) DO NOTHING",
             [(m["id"], m["nome"], m["especialidade"], m["cod"], m["meta"]) for m in medicos]
         )
         conn.commit()
@@ -178,6 +296,15 @@ def init_db():
     else:
         erros.append(f"Arquivo de médicos não encontrado em: {MEDICOS_SEED}")
 
+    # Como os médicos do histórico entram com id explícito (do JSON), a
+    # sequência do SERIAL precisa ser adiantada manualmente, senão um novo
+    # médico cadastrado pela tela poderia tentar usar um id já existente.
+    cur.execute(
+        "SELECT setval(pg_get_serial_sequence('medicos','id'), "
+        "COALESCE((SELECT MAX(id) FROM medicos), 1))"
+    )
+    conn.commit()
+
     # Sincroniza o histórico da mesma forma: roda sempre, usando INSERT OR
     # IGNORE (a restrição UNIQUE(data, medico) evita duplicar registros já
     # existentes) — preenche automaticamente qualquer linha do histórico que
@@ -186,12 +313,13 @@ def init_db():
         registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
         antes = cur.execute("SELECT COUNT(*) FROM base").fetchone()[0]
         cur.executemany("""
-            INSERT OR IGNORE INTO base
+            INSERT INTO base
                 (data, mes, dia_semana, medico, especialidade, cod_medico,
                  discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
                  faltosos, falta_profissional, agendados, total_atendidos, meta,
                  absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (data, medico) DO NOTHING
         """, [
             (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
              r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
@@ -247,7 +375,8 @@ def adicionar_medico(nome: str, especialidade: str, cod: str, meta):
             (nome, (especialidade or "").strip(), (cod or "").strip(), meta)
         )
         conn.commit()
-    except sqlite3.IntegrityError as e:
+    except psycopg2.Error as e:
+        conn.rollback()
         conn.close()
         return False, f"Não foi possível salvar: {e}"
     conn.close()
@@ -298,36 +427,29 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
           nr_matricula, usuario, assistido, servidor, consulta, "Realizado",
           datetime.now().isoformat(timespec="seconds")))
 
-    # Base: um registro agregado por (data, médico). Diferente do VBA original
-    # (que só criava a linha e não voltava a atualizá-la), aqui a linha é
-    # criada na primeira vez e os contadores são incrementados nos lançamentos
-    # seguintes do mesmo dia/médico — assim o resumo diário fica sempre correto.
+    # Base: um registro agregado por (data, médico). Usa UPSERT atômico
+    # (INSERT ... ON CONFLICT) em vez de "verificar se existe, depois inserir
+    # ou atualizar" — esse padrão em dois passos tem uma condição de corrida
+    # real quando duas pessoas salvam pro mesmo dia/médico ao mesmo tempo.
     meta = med["meta"] if med else None
-    existente = cur.execute(
-        "SELECT id FROM base WHERE data = ? AND medico = ?",
-        (data_atendimento.isoformat(), medico)
-    ).fetchone()
+    campo = {"assistido": "discentes_assistidos",
+             "discente": "discentes_naoassistidos",
+             "servidor": "atendidos_servidores"}[categoria]
 
-    if existente is None:
-        cur.execute("""
-            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
-                               discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
-                               total_atendidos, meta)
-            VALUES (?,?,?,?,?,?,?,?,?,1,?)
-        """, (data_atendimento.isoformat(), nome_mes(data_atendimento),
-              nome_dia(data_atendimento), medico, especialidade, cod_medico,
-              1 if categoria == "assistido" else 0,
-              1 if categoria == "discente" else 0,
-              1 if categoria == "servidor" else 0,
-              meta))
-    else:
-        campo = {"assistido": "discentes_assistidos",
-                 "discente": "discentes_naoassistidos",
-                 "servidor": "atendidos_servidores"}[categoria]
-        cur.execute(f"""
-            UPDATE base SET {campo} = {campo} + 1, total_atendidos = total_atendidos + 1
-            WHERE id = ?
-        """, (existente["id"],))
+    cur.execute(f"""
+        INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                           discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
+                           total_atendidos, meta)
+        VALUES (?,?,?,?,?,?,?,?,?,1,?)
+        ON CONFLICT (data, medico) DO UPDATE SET
+            {campo} = base.{campo} + 1,
+            total_atendidos = base.total_atendidos + 1
+    """, (data_atendimento.isoformat(), nome_mes(data_atendimento),
+          nome_dia(data_atendimento), medico, especialidade, cod_medico,
+          1 if categoria == "assistido" else 0,
+          1 if categoria == "discente" else 0,
+          1 if categoria == "servidor" else 0,
+          meta))
 
     conn.commit()
     conn.close()
@@ -362,26 +484,19 @@ def registrar_dia(data_ref: date, medico: str, turno: str, motivo: str):
           datetime.now().isoformat(timespec="seconds")))
 
     meta = med["meta"] if med else None
-    existente = cur.execute(
-        "SELECT id FROM base WHERE data = ? AND medico = ?",
-        (data_ref.isoformat(), medico)
-    ).fetchone()
+    incremento_faltosos = 0 if motivo == "Presença" else 1
 
-    if existente is None:
-        cur.execute("""
-            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
-                               faltosos, falta_profissional, meta)
-            VALUES (?,?,?,?,?,?,?,?,?)
-        """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref),
-              medico, especialidade, cod_medico, 0 if motivo == "Presença" else 1,
-              codigo_falta, meta))
-    else:
-        if motivo != "Presença":
-            cur.execute("UPDATE base SET faltosos = faltosos + 1, falta_profissional = ? WHERE id = ?",
-                        (codigo_falta, existente["id"]))
-        else:
-            cur.execute("UPDATE base SET falta_profissional = ? WHERE id = ?",
-                        (codigo_falta, existente["id"]))
+    cur.execute("""
+        INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                           faltosos, falta_profissional, meta)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (data, medico) DO UPDATE SET
+            faltosos = base.faltosos + ?,
+            falta_profissional = ?
+    """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref),
+          medico, especialidade, cod_medico, incremento_faltosos,
+          codigo_falta, meta,
+          incremento_faltosos, codigo_falta))
 
     conn.commit()
     conn.close()
@@ -453,14 +568,14 @@ def atualizar_status_atendimento(ficha_id: int, novo_status: str):
             if era_realizado and not fica_realizado:
                 cur.execute("UPDATE base SET faltosos = faltosos + 1 WHERE id = ?", (base_row["id"],))
             elif not era_realizado and fica_realizado:
-                cur.execute("UPDATE base SET faltosos = MAX(faltosos - 1, 0) WHERE id = ?",
+                cur.execute("UPDATE base SET faltosos = GREATEST(faltosos - 1, 0) WHERE id = ?",
                             (base_row["id"],))
         else:
             campo = _campo_categoria(row)
             if era_realizado and not fica_realizado:
                 cur.execute(f"""
-                    UPDATE base SET {campo} = MAX({campo} - 1, 0),
-                                     total_atendidos = MAX(total_atendidos - 1, 0),
+                    UPDATE base SET {campo} = GREATEST({campo} - 1, 0),
+                                     total_atendidos = GREATEST(total_atendidos - 1, 0),
                                      faltosos = faltosos + 1
                     WHERE id = ?
                 """, (base_row["id"],))
@@ -468,7 +583,7 @@ def atualizar_status_atendimento(ficha_id: int, novo_status: str):
                 cur.execute(f"""
                     UPDATE base SET {campo} = {campo} + 1,
                                      total_atendidos = total_atendidos + 1,
-                                     faltosos = MAX(faltosos - 1, 0)
+                                     faltosos = GREATEST(faltosos - 1, 0)
                     WHERE id = ?
                 """, (base_row["id"],))
         # se trocou entre dois motivos de falta diferentes, os totais não mudam
@@ -517,13 +632,13 @@ def excluir_atendimento(ficha_id: int):
             if row.get("nome_usuario"):
                 campo = _campo_categoria(row)
                 cur.execute(f"""
-                    UPDATE base SET {campo} = MAX({campo} - 1, 0),
-                                     total_atendidos = MAX(total_atendidos - 1, 0)
+                    UPDATE base SET {campo} = GREATEST({campo} - 1, 0),
+                                     total_atendidos = GREATEST(total_atendidos - 1, 0)
                     WHERE id = ?
                 """, (base_row["id"],))
             # marcador de presença sem paciente: nada a decrementar aqui
         else:
-            cur.execute("UPDATE base SET faltosos = MAX(faltosos - 1, 0) WHERE id = ?",
+            cur.execute("UPDATE base SET faltosos = GREATEST(faltosos - 1, 0) WHERE id = ?",
                         (base_row["id"],))
 
     cur.execute("DELETE FROM ficha WHERE id = ?", (ficha_id,))
@@ -546,12 +661,13 @@ def forcar_reseed_base():
         return 0
     registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
     cur.executemany("""
-        INSERT OR IGNORE INTO base
+        INSERT INTO base
             (data, mes, dia_semana, medico, especialidade, cod_medico,
              discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
              faltosos, falta_profissional, agendados, total_atendidos, meta,
              absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (data, medico) DO NOTHING
     """, [
         (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
          r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
@@ -568,7 +684,7 @@ def forcar_reseed_base():
 
 def get_ficha_df():
     import pandas as pd
-    conn = get_conn()
+    conn = psycopg2.connect(_get_db_url())
     df = pd.read_sql_query("SELECT * FROM ficha ORDER BY data, id", conn)
     conn.close()
     return df
@@ -576,7 +692,7 @@ def get_ficha_df():
 
 def get_base_df():
     import pandas as pd
-    conn = get_conn()
+    conn = psycopg2.connect(_get_db_url())
     df = pd.read_sql_query("SELECT * FROM base ORDER BY data", conn)
     conn.close()
     return df
@@ -595,6 +711,65 @@ def set_config(chave, valor):
                  "ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor", (chave, valor))
     conn.commit()
     conn.close()
+
+
+TABELAS_BACKUP = ["medicos", "base", "ficha", "config"]
+
+
+def gerar_backup_json():
+    """
+    Monta um backup completo do banco (médicos, base, ficha, config — inclui
+    as senhas) em formato JSON, pronto para download. Não grava nada em
+    disco — é para o usuário baixar e guardar em local seguro (Google Drive,
+    e-mail, etc.), já que o disco do Streamlit Cloud é temporário.
+    """
+    conn = get_conn()
+    dump = {
+        "versao": 1,
+        "gerado_em": datetime.now().isoformat(timespec="seconds"),
+        "tabelas": {},
+    }
+    for tabela in TABELAS_BACKUP:
+        rows = conn.execute(f"SELECT * FROM {tabela}").fetchall()
+        dump["tabelas"][tabela] = [dict(r) for r in rows]
+    conn.close()
+    return json.dumps(dump, ensure_ascii=False, indent=1).encode("utf-8")
+
+
+def restaurar_backup_json(conteudo: bytes):
+    """
+    Restaura um backup gerado por gerar_backup_json(). Substitui TODO o
+    conteúdo atual das tabelas pelo do backup (operação destrutiva —
+    a tela que chama isso deve pedir confirmação antes).
+    Retorna um resumo {tabela: quantidade_restaurada}.
+    """
+    dump = json.loads(conteudo.decode("utf-8"))
+    if "tabelas" not in dump:
+        raise ValueError("Arquivo de backup inválido — não parece ter sido gerado por este sistema.")
+
+    resumo = {}
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        for tabela in TABELAS_BACKUP:
+            registros = dump["tabelas"].get(tabela, [])
+            cur.execute(f"DELETE FROM {tabela}")
+            if registros:
+                colunas = list(registros[0].keys())
+                colunas_sql = ",".join(colunas)
+                placeholders = ",".join(["?"] * len(colunas))
+                cur.executemany(
+                    f"INSERT INTO {tabela} ({colunas_sql}) VALUES ({placeholders})",
+                    [tuple(r.get(c) for c in colunas) for r in registros]
+                )
+            resumo[tabela] = len(registros)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return resumo
 
 
 def get_mapa_atendimento(medico: str, data_sel: date, turno: str | None):
