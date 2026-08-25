@@ -143,7 +143,7 @@ def _get_db_url():
 
 
 def get_conn():
-    conn = psycopg2.connect(_get_db_url())
+    conn = psycopg2.connect(_get_db_url(), connect_timeout=10)
     return PGConnection(conn)
 
 
@@ -684,7 +684,7 @@ def forcar_reseed_base():
 
 def get_ficha_df():
     import pandas as pd
-    conn = psycopg2.connect(_get_db_url())
+    conn = psycopg2.connect(_get_db_url(), connect_timeout=10)
     df = pd.read_sql_query("SELECT * FROM ficha ORDER BY data, id", conn)
     conn.close()
     return df
@@ -692,7 +692,7 @@ def get_ficha_df():
 
 def get_base_df():
     import pandas as pd
-    conn = psycopg2.connect(_get_db_url())
+    conn = psycopg2.connect(_get_db_url(), connect_timeout=10)
     df = pd.read_sql_query("SELECT * FROM base ORDER BY data", conn)
     conn.close()
     return df

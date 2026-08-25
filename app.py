@@ -105,7 +105,22 @@ def tela_login():
 
 
 st.set_page_config(page_title="CRAS - Sistema de Atendimento", page_icon="🏥", layout="wide")
-resultado_init = db.init_db()
+
+try:
+    resultado_init = db.init_db()
+except Exception as e:
+    mostrar_logo_principal()
+    st.title("Sistema de Atendimento CRAS")
+    st.error(
+        "❌ **Não foi possível conectar ao banco de dados.**\n\n"
+        "Isso geralmente significa que a chave `supabase_db_url` nas Secrets está "
+        "ausente, incorreta, ou usando o host/porta errados (confira se está usando "
+        "o **Session pooler**, porta **6543**, e não a conexão direta porta 5432 — "
+        "o Streamlit Cloud não alcança hosts só-IPv6)."
+    )
+    with st.expander("Detalhes técnicos do erro"):
+        st.code(str(e))
+    st.stop()
 
 # Primeiro acesso: força a definição das senhas antes de liberar qualquer página
 if not db.get_config("senha_admin") or not db.get_config("senha_recepcao"):
