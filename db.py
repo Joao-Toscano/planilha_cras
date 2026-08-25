@@ -8,6 +8,7 @@ dorme/reinicia.
 import json
 import psycopg2
 import psycopg2.extensions
+import psycopg2.pool
 from pathlib import Path
 from datetime import date, datetime
 
@@ -101,8 +102,9 @@ class PGCursor:
 
 
 class PGConnection:
-    def __init__(self, conn):
+    def __init__(self, conn, pool=None):
         self._conn = conn
+        self._pool = pool
 
     def cursor(self):
         return PGCursor(self._conn.cursor())
@@ -119,7 +121,24 @@ class PGConnection:
         self._conn.rollback()
 
     def close(self):
-        self._conn.close()
+        # Com pool: devolve a conexão para reuso em vez de fechar de verdade
+        # (abrir uma conexão nova a cada consulta é o que estava deixando o
+        # app lento — cada conexão nova até o Supabase custa uma viagem de
+        # ida e volta pela internet + autenticação).
+        if self._pool is not None:
+            try:
+                # Garante que não sobra transação pendente "contaminando" a
+                # conexão para o próximo uso (caso algum código tenha
+                # esquecido de dar commit/rollback antes de fechar).
+                self._conn.rollback()
+            except Exception:
+                pass
+            try:
+                self._pool.putconn(self._conn)
+            except Exception:
+                pass
+        else:
+            self._conn.close()
 
 
 def _get_db_url():
@@ -142,9 +161,26 @@ def _get_db_url():
     return url
 
 
+# Pool de conexões reaproveitáveis — criado uma única vez por processo (fica
+# vivo entre as reexecuções do script que o Streamlit faz a cada interação),
+# em vez de abrir/fechar uma conexão nova pela internet a cada consulta.
+_pool = None
+
+
+def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=1, maxconn=10, dsn=_get_db_url(), connect_timeout=10
+        )
+    return _pool
+
+
 def get_conn():
-    conn = psycopg2.connect(_get_db_url(), connect_timeout=10)
-    return PGConnection(conn)
+    pool = _get_pool()
+    conn = pool.getconn()
+    conn.autocommit = False
+    return PGConnection(conn, pool)
 
 
 def init_db():
@@ -684,17 +720,25 @@ def forcar_reseed_base():
 
 def get_ficha_df():
     import pandas as pd
-    conn = psycopg2.connect(_get_db_url(), connect_timeout=10)
-    df = pd.read_sql_query("SELECT * FROM ficha ORDER BY data, id", conn)
-    conn.close()
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        df = pd.read_sql_query("SELECT * FROM ficha ORDER BY data, id", conn)
+    finally:
+        conn.rollback()
+        pool.putconn(conn)
     return df
 
 
 def get_base_df():
     import pandas as pd
-    conn = psycopg2.connect(_get_db_url(), connect_timeout=10)
-    df = pd.read_sql_query("SELECT * FROM base ORDER BY data", conn)
-    conn.close()
+    pool = _get_pool()
+    conn = pool.getconn()
+    try:
+        df = pd.read_sql_query("SELECT * FROM base ORDER BY data", conn)
+    finally:
+        conn.rollback()
+        pool.putconn(conn)
     return df
 
 
