@@ -9,6 +9,7 @@ import json
 import psycopg2
 import psycopg2.extensions
 import psycopg2.pool
+import streamlit as st
 from pathlib import Path
 from datetime import date, datetime
 
@@ -181,6 +182,12 @@ def get_conn():
     conn = pool.getconn()
     conn.autocommit = False
     return PGConnection(conn, pool)
+
+
+def _limpar_cache():
+    """Chamado depois de qualquer escrita, para que a tela mostre os dados
+    atualizados na hora em vez de esperar o cache expirar sozinho."""
+    st.cache_data.clear()
 
 
 def init_db():
@@ -376,6 +383,7 @@ def init_db():
     return {"info": avisos, "erros": erros}
 
 
+@st.cache_data(ttl=30)
 def listar_medicos():
     conn = get_conn()
     rows = conn.execute("SELECT * FROM medicos ORDER BY nome").fetchall()
@@ -383,6 +391,7 @@ def listar_medicos():
     return [dict(r) for r in rows]
 
 
+@st.cache_data(ttl=30)
 def buscar_medico(nome: str):
     conn = get_conn()
     row = conn.execute("SELECT * FROM medicos WHERE nome = ?", (nome,)).fetchone()
@@ -416,6 +425,7 @@ def adicionar_medico(nome: str, especialidade: str, cod: str, meta):
         conn.close()
         return False, f"Não foi possível salvar: {e}"
     conn.close()
+    _limpar_cache()
     return True, None
 
 
@@ -426,6 +436,7 @@ def remover_medico(nome: str):
     conn.execute("DELETE FROM medicos WHERE nome = ?", (nome,))
     conn.commit()
     conn.close()
+    _limpar_cache()
 
 
 def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
@@ -489,6 +500,7 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
 
     conn.commit()
     conn.close()
+    _limpar_cache()
 
 
 def registrar_dia(data_ref: date, medico: str, turno: str, motivo: str):
@@ -536,11 +548,13 @@ def registrar_dia(data_ref: date, medico: str, turno: str, motivo: str):
 
     conn.commit()
     conn.close()
+    _limpar_cache()
 
 
 STATUS_OPCOES = ["Realizado", "Falta do profissional", "Falta do usuário"]
 
 
+@st.cache_data(ttl=30)
 def get_atendimentos_do_dia(data_ref: date, medico: str | None = None):
     """Lista os atendimentos lançados numa data (opcionalmente filtrando por
     médico), para revisão/marcação de status — equivalente a olhar a aba
@@ -626,9 +640,11 @@ def atualizar_status_atendimento(ficha_id: int, novo_status: str):
 
     conn.commit()
     conn.close()
+    _limpar_cache()
     return True
 
 
+@st.cache_data(ttl=30)
 def contar_nao_realizados(medico: str, data_ref: date, turno: str | None = None):
     """Quantos atendimentos desse dia/médico(/turno) NÃO foram realizados."""
     conn = get_conn()
@@ -680,6 +696,7 @@ def excluir_atendimento(ficha_id: int):
     cur.execute("DELETE FROM ficha WHERE id = ?", (ficha_id,))
     conn.commit()
     conn.close()
+    _limpar_cache()
     return True
 
 
@@ -715,9 +732,11 @@ def forcar_reseed_base():
     conn.commit()
     n = len(registros)
     conn.close()
+    _limpar_cache()
     return n
 
 
+@st.cache_data(ttl=30)
 def get_ficha_df():
     import pandas as pd
     pool = _get_pool()
@@ -730,6 +749,7 @@ def get_ficha_df():
     return df
 
 
+@st.cache_data(ttl=30)
 def get_base_df():
     import pandas as pd
     pool = _get_pool()
@@ -742,6 +762,7 @@ def get_base_df():
     return df
 
 
+@st.cache_data(ttl=30)
 def get_config(chave, default=""):
     conn = get_conn()
     row = conn.execute("SELECT valor FROM config WHERE chave = ?", (chave,)).fetchone()
@@ -755,6 +776,7 @@ def set_config(chave, valor):
                  "ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor", (chave, valor))
     conn.commit()
     conn.close()
+    _limpar_cache()
 
 
 TABELAS_BACKUP = ["medicos", "base", "ficha", "config"]
@@ -813,9 +835,11 @@ def restaurar_backup_json(conteudo: bytes):
         raise
     finally:
         conn.close()
+    _limpar_cache()
     return resumo
 
 
+@st.cache_data(ttl=30)
 def get_mapa_atendimento(medico: str, data_sel: date, turno: str | None):
     """Retorna a lista de atendimentos REALIZADOS de um médico numa data (e
     turno opcional) — equivalente à macro GerarMapaPDF, já excluindo faltas.
