@@ -491,8 +491,33 @@ elif pagina == "📊 Dashboard":
         st.divider()
 
         anos = sorted(base_df["data"].dt.year.unique(), reverse=True)
-        ano_sel = st.selectbox("Filtrar por ano", ["Todos"] + [str(a) for a in anos])
-        df = base_df if ano_sel == "Todos" else base_df[base_df["data"].dt.year == int(ano_sel)]
+        meses_nomes = ["Todos"] + db.NOMES_MES
+        especialidades = ["Todas"] + sorted(base_df["especialidade"].dropna().unique())
+        medicos_dash = ["Todos"] + sorted(base_df["medico"].dropna().unique())
+
+        colf1, colf2, colf3, colf4 = st.columns(4)
+        with colf1:
+            ano_sel = st.selectbox("Ano", ["Todos"] + [str(a) for a in anos])
+        with colf2:
+            mes_sel = st.selectbox("Mês", meses_nomes)
+        with colf3:
+            especialidade_sel = st.selectbox("Especialidade", especialidades)
+        with colf4:
+            medico_sel_dash = st.selectbox("Médico", medicos_dash)
+
+        df = base_df.copy()
+        if ano_sel != "Todos":
+            df = df[df["data"].dt.year == int(ano_sel)]
+        if mes_sel != "Todos":
+            df = df[df["mes"] == mes_sel]
+        if especialidade_sel != "Todas":
+            df = df[df["especialidade"] == especialidade_sel]
+        if medico_sel_dash != "Todos":
+            df = df[df["medico"] == medico_sel_dash]
+
+        if df.empty:
+            st.warning("Nenhum dado encontrado para esses filtros.")
+            st.stop()
 
         CORES = ["#00622F", "#3C8659", "#7DAE8C", "#B8D4C2", "#C9A227"]
 

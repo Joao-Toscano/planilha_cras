@@ -397,46 +397,132 @@ def init_db():
     # esses atendimentos não têm uma chave natural pra evitar duplicar (ao
     # contrário do histórico, que usa UNIQUE(data,medico)), o controle é
     # feito por uma marca salva em 'config' assim que termina.
+    # IMPORTANTE: isso é feito em LOTE (poucas idas ao banco), não um
+    # atendimento de cada vez — com ~1.800 registros, inserir um por um
+    # significaria milhares de viagens de ida e volta até o Supabase pela
+    # internet, o que estourava o tempo do processo antes de terminar.
     if AGENDAS_SEED.exists():
         ja_importado = cur.execute(
             "SELECT valor FROM config WHERE chave = 'agendas_2026_importadas'"
         ).fetchone()
         if not ja_importado:
-            conn.close()  # as chamadas abaixo abrem suas próprias conexões do pool
-
             dados_agenda = json.loads(AGENDAS_SEED.read_text(encoding="utf-8"))
+
+            # 1) Médicos novos que a agenda trouxe e ainda não existem
             for medico_novo in dados_agenda.get("medicos_novos", []):
-                if not buscar_medico(medico_novo["nome"]):
-                    adicionar_medico(medico_novo["nome"], medico_novo["especialidade"],
-                                      medico_novo["cod"], medico_novo["meta"])
+                cur.execute(
+                    "INSERT INTO medicos (nome, especialidade, cod, meta) VALUES (?,?,?,?) "
+                    "ON CONFLICT (nome) DO NOTHING",
+                    (medico_novo["nome"], medico_novo["especialidade"],
+                     medico_novo["cod"], medico_novo["meta"])
+                )
+            conn.commit()
+            medicos_cache = {m["nome"]: m for m in
+                              [dict(r) for r in cur.execute("SELECT * FROM medicos")]}
+
+            # 2) Monta todas as linhas da Ficha de uma vez
+            linhas_ficha = []
+            deltas_base = {}  # (data, medico) -> incrementos agregados
+
+            def _delta(data_iso, medico):
+                chave = (data_iso, medico)
+                if chave not in deltas_base:
+                    deltas_base[chave] = {
+                        "discentes_assistidos": 0, "discentes_naoassistidos": 0,
+                        "atendidos_servidores": 0, "faltosos": 0, "total_atendidos": 0,
+                        "especialidade": "", "cod_medico": "", "meta": None,
+                    }
+                return deltas_base[chave]
 
             for at in dados_agenda.get("atendimentos", []):
-                salvar_atendimento(
-                    at["nr_cras"], date.fromisoformat(at["data"]), at["medico"], "",
-                    at["nome_usuario"], at["matricula"], at["categoria"], at["consulta"],
-                )
-                if at["faltou"]:
-                    c2 = get_conn()
-                    row = c2.execute(
-                        "SELECT id FROM ficha WHERE medico = ? AND data = ? AND nome_usuario = ? "
-                        "ORDER BY id DESC LIMIT 1",
-                        (at["medico"], at["data"], at["nome_usuario"])
-                    ).fetchone()
-                    c2.close()
-                    if row:
-                        atualizar_status_atendimento(row["id"], "Falta do usuário")
+                med = medicos_cache.get(at["medico"], {})
+                especialidade = med.get("especialidade") or ""
+                cod_medico = med.get("cod") or ""
+                status = "Falta do usuário" if at["faltou"] else "Realizado"
+                assistido = "Sim" if at["categoria"] == "assistido" else "Não"
+                servidor = "Sim" if at["categoria"] == "servidor" else "Não"
+                data_obj = date.fromisoformat(at["data"])
+
+                linhas_ficha.append((
+                    at["nr_cras"], at["data"], nome_mes(data_obj), nome_dia(data_obj), "",
+                    None, at["medico"], especialidade, at["matricula"], at["nome_usuario"],
+                    assistido, servidor, at["consulta"], status, None,
+                    datetime.now().isoformat(timespec="seconds"),
+                ))
+
+                d = _delta(at["data"], at["medico"])
+                d["especialidade"] = especialidade
+                d["cod_medico"] = cod_medico
+                d["meta"] = med.get("meta")
+                if not at["faltou"]:
+                    d["total_atendidos"] += 1
+                    if at["categoria"] == "assistido":
+                        d["discentes_assistidos"] += 1
+                    elif at["categoria"] == "servidor":
+                        d["atendidos_servidores"] += 1
+                    else:
+                        d["discentes_naoassistidos"] += 1
+                else:
+                    d["faltosos"] += 1
 
             for dia in dados_agenda.get("dias_especiais", []):
-                registrar_dia(date.fromisoformat(dia["data"]), dia["medico"], "", dia["motivo"])
+                med = medicos_cache.get(dia["medico"], {})
+                data_obj = date.fromisoformat(dia["data"])
+                linhas_ficha.append((
+                    None, dia["data"], nome_mes(data_obj), nome_dia(data_obj), "",
+                    None, dia["medico"], med.get("especialidade") or "", None, None,
+                    "Não", "Não", None, "Falta do profissional", dia["motivo"],
+                    datetime.now().isoformat(timespec="seconds"),
+                ))
+                d = _delta(dia["data"], dia["medico"])
+                d["especialidade"] = med.get("especialidade") or ""
+                d["cod_medico"] = med.get("cod") or ""
+                d["meta"] = med.get("meta")
+                d["faltosos"] += 1
+
+            # 3) Grava tudo na Ficha numa única operação em lote
+            if linhas_ficha:
+                cur.executemany("""
+                    INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
+                                        especialidade, matricula, nome_usuario, assistido,
+                                        servidor, consulta, status, motivo, criado_em)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, linhas_ficha)
+                conn.commit()
+
+            # 4) Atualiza a Base com os totais agregados, também em lote
+            linhas_base = []
+            for (data_iso, medico), d in deltas_base.items():
+                data_obj = date.fromisoformat(data_iso)
+                linhas_base.append((
+                    data_iso, nome_mes(data_obj), nome_dia(data_obj), medico,
+                    d["especialidade"], d["cod_medico"],
+                    d["discentes_assistidos"], d["discentes_naoassistidos"],
+                    d["atendidos_servidores"], d["faltosos"], d["total_atendidos"], d["meta"],
+                    d["discentes_assistidos"], d["discentes_naoassistidos"],
+                    d["atendidos_servidores"], d["faltosos"], d["total_atendidos"],
+                ))
+            if linhas_base:
+                cur.executemany("""
+                    INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                                       discentes_assistidos, discentes_naoassistidos,
+                                       atendidos_servidores, faltosos, total_atendidos, meta)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT (data, medico) DO UPDATE SET
+                        discentes_assistidos = base.discentes_assistidos + ?,
+                        discentes_naoassistidos = base.discentes_naoassistidos + ?,
+                        atendidos_servidores = base.atendidos_servidores + ?,
+                        faltosos = base.faltosos + ?,
+                        total_atendidos = base.total_atendidos + ?
+                """, linhas_base)
+                conn.commit()
 
             set_config("agendas_2026_importadas", datetime.now().isoformat(timespec="seconds"))
             avisos.append(
                 f"{len(dados_agenda.get('atendimentos', []))} atendimentos e "
                 f"{len(dados_agenda.get('dias_especiais', []))} dias especiais das agendas 2026 "
-                f"(Nutrição/Odontologia) importados automaticamente."
+                f"(Nutrição/Odontologia) importados automaticamente em lote."
             )
-            _ja_inicializado = {"info": avisos, "erros": erros}
-            return _ja_inicializado
 
     conn.close()
     _ja_inicializado = {"info": avisos, "erros": erros}
