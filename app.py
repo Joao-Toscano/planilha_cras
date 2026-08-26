@@ -1,5 +1,5 @@
 import streamlit as st
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import pandas as pd
 
@@ -252,6 +252,59 @@ if pagina == "📝 Lançamento Diário":
                            f"({turno_dia}) — {veio}.")
 
     # -----------------------------------------------------------------
+    # Buscar atendimentos — por médico e período, ou por nome do paciente
+    # -----------------------------------------------------------------
+    with st.expander("🔍 Buscar atendimentos (por médico e período, ou por paciente)"):
+        modo_busca = st.radio("Buscar por", ["Médico e período", "Nome do paciente"],
+                               horizontal=True, key="modo_busca")
+
+        with st.form("form_busca"):
+            if modo_busca == "Médico e período":
+                colb1, colb2, colb3 = st.columns(3)
+                with colb1:
+                    medico_busca = st.selectbox("Médico", ["Todos"] + nomes_medicos, key="medico_busca")
+                with colb2:
+                    data_ini_busca = st.date_input("De", value=date.today() - timedelta(days=7),
+                                                    format="DD/MM/YYYY", key="data_ini_busca")
+                with colb3:
+                    data_fim_busca = st.date_input("Até", value=date.today(),
+                                                    format="DD/MM/YYYY", key="data_fim_busca")
+                nome_busca = None
+            else:
+                nome_busca = st.text_input("Nome do paciente (ou parte dele)", key="nome_busca")
+                medico_busca, data_ini_busca, data_fim_busca = "Todos", None, None
+
+            buscar = st.form_submit_button("🔍 Buscar")
+
+        if buscar:
+            resultados = db.buscar_atendimentos(
+                medico=None if medico_busca == "Todos" else medico_busca,
+                data_inicio=data_ini_busca, data_fim=data_fim_busca,
+                nome_paciente=nome_busca if nome_busca else None,
+            )
+            st.session_state["resultados_busca"] = resultados
+
+        if "resultados_busca" in st.session_state:
+            resultados = st.session_state["resultados_busca"]
+            if not resultados:
+                st.info("Nenhum atendimento encontrado para esse filtro.")
+            else:
+                df_busca = pd.DataFrame(resultados)
+                df_busca["data_fmt"] = pd.to_datetime(df_busca["data"]).dt.strftime("%d/%m/%Y")
+                colunas_exibir = ["data_fmt", "medico", "turno", "nome_usuario", "matricula",
+                                   "consulta", "status"]
+                df_exibir = df_busca[colunas_exibir].copy()
+                df_exibir.columns = ["Data", "Médico", "Turno", "Nome do usuário", "Matrícula",
+                                      "Tipo de consulta", "Status"]
+                st.caption(f"{len(resultados)} resultado(s) encontrado(s).")
+                st.dataframe(df_exibir, width='stretch', hide_index=True)
+                st.download_button(
+                    "⬇️ Baixar resultado (CSV)",
+                    df_exibir.to_csv(index=False).encode("utf-8"),
+                    "busca_atendimentos.csv", "text/csv",
+                )
+
+    # -----------------------------------------------------------------
     # Atendimentos do dia — revisar e marcar status (Realizado / Falta)
     # -----------------------------------------------------------------
     st.subheader("📋 Atendimentos do dia")
@@ -277,8 +330,24 @@ if pagina == "📝 Lançamento Diário":
         df_rev["nome_usuario"] = df_rev["nome_usuario"].fillna("").replace(
             "", "(sem paciente — marcador de presença)")
         df_rev["motivo"] = df_rev["motivo"].fillna("")
-        df_rev_exibir = df_rev[["medico", "turno", "nome_usuario", "matricula", "motivo", "status"]].copy()
-        df_rev_exibir.columns = ["Médico", "Turno", "Nome do usuário", "Matrícula", "Motivo", "Status"]
+        df_rev["consulta"] = df_rev["consulta"].fillna("")
+
+        def _categoria(linha):
+            if linha["servidor"] == "Sim":
+                return "Servidor"
+            elif linha["assistido"] == "Sim":
+                return "Discente assistido (Prape)"
+            elif linha["nome_usuario"] == "(sem paciente — marcador de presença)":
+                return ""
+            else:
+                return "Discente"
+
+        df_rev["categoria"] = df_rev.apply(_categoria, axis=1)
+
+        df_rev_exibir = df_rev[["medico", "turno", "nome_usuario", "matricula",
+                                 "consulta", "categoria", "motivo", "status"]].copy()
+        df_rev_exibir.columns = ["Médico", "Turno", "Nome do usuário", "Matrícula",
+                                  "Tipo de Consulta", "Categoria", "Motivo", "Status"]
 
         editado = st.data_editor(
             df_rev_exibir,
@@ -287,7 +356,8 @@ if pagina == "📝 Lançamento Diário":
                     "Status", options=db.STATUS_OPCOES, required=True
                 ),
             },
-            disabled=["Médico", "Turno", "Nome do usuário", "Matrícula", "Motivo"],
+            disabled=["Médico", "Turno", "Nome do usuário", "Matrícula",
+                      "Tipo de Consulta", "Categoria", "Motivo"],
             width='stretch',
             key="editor_atendimentos_dia",
         )

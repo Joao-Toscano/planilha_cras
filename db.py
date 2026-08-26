@@ -15,6 +15,7 @@ from datetime import date, datetime
 
 MEDICOS_SEED = Path(__file__).parent / "data" / "medicos.json"
 BASE_HISTORICO_SEED = Path(__file__).parent / "data" / "base_historico.json"
+AGENDAS_SEED = Path(__file__).parent / "data" / "agendas_2026.json"
 
 NOMES_MES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -392,6 +393,51 @@ def init_db():
     else:
         erros.append(f"Arquivo de histórico não encontrado em: {BASE_HISTORICO_SEED}")
 
+    # Importa as agendas de 2026 (Nutrição/Odontologia) uma única vez — como
+    # esses atendimentos não têm uma chave natural pra evitar duplicar (ao
+    # contrário do histórico, que usa UNIQUE(data,medico)), o controle é
+    # feito por uma marca salva em 'config' assim que termina.
+    if AGENDAS_SEED.exists():
+        ja_importado = cur.execute(
+            "SELECT valor FROM config WHERE chave = 'agendas_2026_importadas'"
+        ).fetchone()
+        if not ja_importado:
+            conn.close()  # as chamadas abaixo abrem suas próprias conexões do pool
+
+            dados_agenda = json.loads(AGENDAS_SEED.read_text(encoding="utf-8"))
+            for medico_novo in dados_agenda.get("medicos_novos", []):
+                if not buscar_medico(medico_novo["nome"]):
+                    adicionar_medico(medico_novo["nome"], medico_novo["especialidade"],
+                                      medico_novo["cod"], medico_novo["meta"])
+
+            for at in dados_agenda.get("atendimentos", []):
+                salvar_atendimento(
+                    at["nr_cras"], date.fromisoformat(at["data"]), at["medico"], "",
+                    at["nome_usuario"], at["matricula"], at["categoria"], at["consulta"],
+                )
+                if at["faltou"]:
+                    c2 = get_conn()
+                    row = c2.execute(
+                        "SELECT id FROM ficha WHERE medico = ? AND data = ? AND nome_usuario = ? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (at["medico"], at["data"], at["nome_usuario"])
+                    ).fetchone()
+                    c2.close()
+                    if row:
+                        atualizar_status_atendimento(row["id"], "Falta do usuário")
+
+            for dia in dados_agenda.get("dias_especiais", []):
+                registrar_dia(date.fromisoformat(dia["data"]), dia["medico"], "", dia["motivo"])
+
+            set_config("agendas_2026_importadas", datetime.now().isoformat(timespec="seconds"))
+            avisos.append(
+                f"{len(dados_agenda.get('atendimentos', []))} atendimentos e "
+                f"{len(dados_agenda.get('dias_especiais', []))} dias especiais das agendas 2026 "
+                f"(Nutrição/Odontologia) importados automaticamente."
+            )
+            _ja_inicializado = {"info": avisos, "erros": erros}
+            return _ja_inicializado
+
     conn.close()
     _ja_inicializado = {"info": avisos, "erros": erros}
     return _ja_inicializado
@@ -580,6 +626,41 @@ def get_atendimentos_do_dia(data_ref: date, medico: str | None = None):
         q += " AND medico = ?"
         params.append(medico)
     q += " ORDER BY turno, nome_usuario"
+    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    conn.close()
+    return rows
+
+
+@st.cache_data(ttl=30)
+def buscar_atendimentos(medico: str | None = None, data_inicio: date | None = None,
+                         data_fim: date | None = None, nome_paciente: str | None = None):
+    """
+    Busca flexível na Ficha: por médico num intervalo de dias, e/ou por
+    nome (ou parte do nome) do paciente — pode combinar os filtros ou usar
+    só um deles.
+    """
+    conn = get_conn()
+    condicoes = []
+    params = []
+
+    if medico:
+        condicoes.append("medico = ?")
+        params.append(medico)
+    if data_inicio:
+        condicoes.append("data >= ?")
+        params.append(data_inicio.isoformat())
+    if data_fim:
+        condicoes.append("data <= ?")
+        params.append(data_fim.isoformat())
+    if nome_paciente:
+        condicoes.append("nome_usuario ILIKE ?")
+        params.append(f"%{nome_paciente}%")
+
+    q = "SELECT * FROM ficha"
+    if condicoes:
+        q += " WHERE " + " AND ".join(condicoes)
+    q += " ORDER BY data DESC, turno, nome_usuario"
+
     rows = [dict(r) for r in conn.execute(q, params).fetchall()]
     conn.close()
     return rows
