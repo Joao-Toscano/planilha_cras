@@ -190,7 +190,20 @@ def _limpar_cache():
     st.cache_data.clear()
 
 
+_ja_inicializado = None  # None = ainda não rodou; depois vira o resultado, cacheado
+
+
 def init_db():
+    # init_db() era chamado sem condição a cada interação (o Streamlit reexecuta
+    # o script inteiro a cada clique). Isso significava reenviar ~2.000 linhas
+    # do histórico pela internet pra conferir "já existe?" a cada clique —
+    # a causa real da lentidão. Agora só roda de verdade uma vez por processo
+    # (a primeira vez que o app inicia depois de um deploy/reinício); nas
+    # próximas chamadas, devolve o resultado já calculado na hora.
+    global _ja_inicializado
+    if _ja_inicializado is not None:
+        return _ja_inicializado
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -380,7 +393,8 @@ def init_db():
         erros.append(f"Arquivo de histórico não encontrado em: {BASE_HISTORICO_SEED}")
 
     conn.close()
-    return {"info": avisos, "erros": erros}
+    _ja_inicializado = {"info": avisos, "erros": erros}
+    return _ja_inicializado
 
 
 @st.cache_data(ttl=30)
