@@ -8,6 +8,7 @@ dorme/reinicia.
 import json
 import psycopg2
 import psycopg2.extensions
+import psycopg2.extras
 import psycopg2.pool
 import streamlit as st
 from pathlib import Path
@@ -82,6 +83,18 @@ class PGCursor:
 
     def executemany(self, sql, seq_params):
         self._cur.executemany(sql.replace("?", "%s"), list(seq_params))
+        return self
+
+    def execute_values(self, sql, argslist):
+        """Manda várias linhas numa ÚNICA instrução SQL de verdade (uma
+        viagem ao banco, não uma por linha) — ao contrário de executemany(),
+        que o psycopg2 executa linha por linha por baixo dos panos mesmo
+        parecendo 'em lote'. Use isso para inserções grandes (centenas ou
+        milhares de linhas). O sql deve ter um único 'VALUES %s' no lugar
+        da lista de parênteses."""
+        if not argslist:
+            return self
+        psycopg2.extras.execute_values(self._cur, sql.replace("?", "%s"), argslist)
         return self
 
     def fetchone(self):
@@ -340,8 +353,8 @@ def init_db():
     if MEDICOS_SEED.exists():
         medicos = json.loads(MEDICOS_SEED.read_text(encoding="utf-8"))
         antes = cur.execute("SELECT COUNT(*) FROM medicos").fetchone()[0]
-        cur.executemany(
-            "INSERT INTO medicos (id, nome, especialidade, cod, meta) VALUES (?,?,?,?,?) "
+        cur.execute_values(
+            "INSERT INTO medicos (id, nome, especialidade, cod, meta) VALUES %s "
             "ON CONFLICT (id) DO NOTHING",
             [(m["id"], m["nome"], m["especialidade"], m["cod"], m["meta"]) for m in medicos]
         )
@@ -369,13 +382,13 @@ def init_db():
     if BASE_HISTORICO_SEED.exists():
         registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
         antes = cur.execute("SELECT COUNT(*) FROM base").fetchone()[0]
-        cur.executemany("""
+        cur.execute_values("""
             INSERT INTO base
                 (data, mes, dia_semana, medico, especialidade, cod_medico,
                  discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
                  faltosos, falta_profissional, agendados, total_atendidos, meta,
                  absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES %s
             ON CONFLICT (data, medico) DO NOTHING
         """, [
             (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
@@ -480,17 +493,19 @@ def init_db():
                 d["meta"] = med.get("meta")
                 d["faltosos"] += 1
 
-            # 3) Grava tudo na Ficha numa única operação em lote
+            # 3) Grava tudo na Ficha numa única operação em lote (de verdade)
             if linhas_ficha:
-                cur.executemany("""
+                cur.execute_values("""
                     INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
                                         especialidade, matricula, nome_usuario, assistido,
                                         servidor, consulta, status, motivo, criado_em)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES %s
                 """, linhas_ficha)
                 conn.commit()
 
-            # 4) Atualiza a Base com os totais agregados, também em lote
+            # 4) Atualiza a Base com os totais agregados, também em lote —
+            # usa EXCLUDED (o valor que se tentou inserir) em vez de repetir
+            # os valores na query, o que também permite usar execute_values
             linhas_base = []
             for (data_iso, medico), d in deltas_base.items():
                 data_obj = date.fromisoformat(data_iso)
@@ -499,21 +514,19 @@ def init_db():
                     d["especialidade"], d["cod_medico"],
                     d["discentes_assistidos"], d["discentes_naoassistidos"],
                     d["atendidos_servidores"], d["faltosos"], d["total_atendidos"], d["meta"],
-                    d["discentes_assistidos"], d["discentes_naoassistidos"],
-                    d["atendidos_servidores"], d["faltosos"], d["total_atendidos"],
                 ))
             if linhas_base:
-                cur.executemany("""
+                cur.execute_values("""
                     INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
                                        discentes_assistidos, discentes_naoassistidos,
                                        atendidos_servidores, faltosos, total_atendidos, meta)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES %s
                     ON CONFLICT (data, medico) DO UPDATE SET
-                        discentes_assistidos = base.discentes_assistidos + ?,
-                        discentes_naoassistidos = base.discentes_naoassistidos + ?,
-                        atendidos_servidores = base.atendidos_servidores + ?,
-                        faltosos = base.faltosos + ?,
-                        total_atendidos = base.total_atendidos + ?
+                        discentes_assistidos = base.discentes_assistidos + EXCLUDED.discentes_assistidos,
+                        discentes_naoassistidos = base.discentes_naoassistidos + EXCLUDED.discentes_naoassistidos,
+                        atendidos_servidores = base.atendidos_servidores + EXCLUDED.atendidos_servidores,
+                        faltosos = base.faltosos + EXCLUDED.faltosos,
+                        total_atendidos = base.total_atendidos + EXCLUDED.total_atendidos
                 """, linhas_base)
                 conn.commit()
 
@@ -704,9 +717,12 @@ STATUS_OPCOES = ["Realizado", "Falta do profissional", "Falta do usuário"]
 def get_atendimentos_do_dia(data_ref: date, medico: str | None = None):
     """Lista os atendimentos lançados numa data (opcionalmente filtrando por
     médico), para revisão/marcação de status — equivalente a olhar a aba
-    Ficha filtrada pelo dia."""
+    Ficha filtrada pelo dia. Não traz os registros importados em lote de
+    planilhas de agenda (esses vêm sem turno e já chegam com o status
+    resolvido — não fazem parte da revisão do dia a dia; para achar/excluir
+    um deles, use a busca)."""
     conn = get_conn()
-    q = "SELECT * FROM ficha WHERE data = ?"
+    q = "SELECT * FROM ficha WHERE data = ? AND turno IS NOT NULL AND turno != ''"
     params = [data_ref.isoformat()]
     if medico:
         q += " AND medico = ?"
@@ -894,13 +910,13 @@ def forcar_reseed_base():
         conn.close()
         return 0
     registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
-    cur.executemany("""
+    cur.execute_values("""
         INSERT INTO base
             (data, mes, dia_semana, medico, especialidade, cod_medico,
              discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
              faltosos, falta_profissional, agendados, total_atendidos, meta,
              absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES %s
         ON CONFLICT (data, medico) DO NOTHING
     """, [
         (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
@@ -923,7 +939,10 @@ def get_ficha_df():
     pool = _get_pool()
     conn = pool.getconn()
     try:
-        df = pd.read_sql_query("SELECT * FROM ficha ORDER BY data, id", conn)
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM ficha ORDER BY data, id")
+        colunas = [d[0] for d in cur.description]
+        df = pd.DataFrame(cur.fetchall(), columns=colunas)
     finally:
         conn.rollback()
         pool.putconn(conn)
@@ -936,7 +955,10 @@ def get_base_df():
     pool = _get_pool()
     conn = pool.getconn()
     try:
-        df = pd.read_sql_query("SELECT * FROM base ORDER BY data", conn)
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM base ORDER BY data")
+        colunas = [d[0] for d in cur.description]
+        df = pd.DataFrame(cur.fetchall(), columns=colunas)
     finally:
         conn.rollback()
         pool.putconn(conn)
@@ -1004,9 +1026,8 @@ def restaurar_backup_json(conteudo: bytes):
             if registros:
                 colunas = list(registros[0].keys())
                 colunas_sql = ",".join(colunas)
-                placeholders = ",".join(["?"] * len(colunas))
-                cur.executemany(
-                    f"INSERT INTO {tabela} ({colunas_sql}) VALUES ({placeholders})",
+                cur.execute_values(
+                    f"INSERT INTO {tabela} ({colunas_sql}) VALUES %s",
                     [tuple(r.get(c) for c in colunas) for r in registros]
                 )
             resumo[tabela] = len(registros)

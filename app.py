@@ -304,12 +304,32 @@ if pagina == "📝 Lançamento Diário":
                     "busca_atendimentos.csv", "text/csv",
                 )
 
+                with st.expander("🗑️ Excluir um dos resultados da busca"):
+                    st.caption("Exclui de vez, ajustando os totais da Base de Dados também "
+                               "(inclusive registros importados de planilha).")
+                    opcoes_busca = {
+                        f"{r.get('data')} — {r['medico']} — "
+                        f"{r.get('nome_usuario') or '(sem paciente)'} — {r['status']}": r["id"]
+                        for r in resultados
+                    }
+                    escolha_busca = st.selectbox("Registro a excluir", list(opcoes_busca.keys()),
+                                                  index=None, placeholder="Selecione",
+                                                  key="excluir_busca")
+                    if st.button("Excluir definitivamente", type="secondary",
+                                  key="btn_excluir_busca") and escolha_busca:
+                        db.excluir_atendimento(opcoes_busca[escolha_busca])
+                        st.session_state.pop("resultados_busca", None)
+                        st.success("Registro excluído — os totais da Base de Dados já foram ajustados.")
+                        st.rerun()
+
     # -----------------------------------------------------------------
     # Atendimentos do dia — revisar e marcar status (Realizado / Falta)
     # -----------------------------------------------------------------
     st.subheader("📋 Atendimentos do dia")
     st.caption("Marque abaixo se cada atendimento aconteceu ou não, e o motivo — "
-               "só os marcados como 'Realizado' entram no Mapa de Atendimento.")
+               "só os marcados como 'Realizado' entram no Mapa de Atendimento. "
+               "(Registros importados de planilha não aparecem aqui — use a busca acima "
+               "pra encontrar e excluir algum deles, se precisar.)")
 
     colr1, colr2 = st.columns(2)
     with colr1:
