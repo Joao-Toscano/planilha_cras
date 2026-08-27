@@ -150,7 +150,9 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
     # --- Linha de resumo (contadores) ---
     servidores = sum(1 for a in atendimentos if a["servidor"] == "Sim")
     disc_assistido = sum(1 for a in atendimentos if a["assistido"] == "Sim" and a["servidor"] != "Sim")
-    discentes = sum(1 for a in atendimentos if a["assistido"] != "Sim" and a["servidor"] != "Sim")
+    # "Discente" conta todo mundo que não é servidor — inclui os assistidos
+    # (antes excluía os assistidos, contando errado abaixo do real).
+    discentes = sum(1 for a in atendimentos if a["servidor"] != "Sim")
     primeira = sum(1 for a in atendimentos if a.get("consulta") == "Primeira consulta")
     retorno = sum(1 for a in atendimentos if a.get("consulta") == "Retorno")
     tratamento = sum(1 for a in atendimentos if a.get("consulta") == "Acompanhamento/tratamento")

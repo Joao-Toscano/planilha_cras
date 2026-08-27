@@ -578,10 +578,12 @@ elif pagina == "📊 Dashboard":
         with c2:
             # 3) Categoria dos Atendimentos (pizza)
             st.subheader("Categoria dos Atendimentos")
+            # "Discente" conta todo mundo que não é servidor — inclui os
+            # assistidos (que também aparecem à parte no card de KPI acima).
             cat = pd.DataFrame({
-                "Categoria": ["Servidor", "Discente", "Discente assistido (Prape)"],
-                "Total": [df["atendidos_servidores"].sum(), df["discentes_naoassistidos"].sum(),
-                          df["discentes_assistidos"].sum()],
+                "Categoria": ["Servidor", "Discente"],
+                "Total": [df["atendidos_servidores"].sum(),
+                          df["discentes_naoassistidos"].sum() + df["discentes_assistidos"].sum()],
             })
             fig3 = px.pie(cat, names="Categoria", values="Total", color_discrete_sequence=CORES)
             st.plotly_chart(fig3, width='stretch')
