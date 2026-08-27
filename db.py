@@ -219,6 +219,19 @@ def init_db():
         return _ja_inicializado
 
     conn = get_conn()
+    try:
+        resultado = _init_db_interno(conn)
+    finally:
+        # Garante que a conexão sempre volta pro pool, mesmo se algo no meio
+        # do processo der erro — antes, um erro aqui deixava a conexão presa
+        # pra sempre, esvaziando o pool aos poucos até estourar.
+        conn.close()
+
+    _ja_inicializado = resultado
+    return _ja_inicializado
+
+
+def _init_db_interno(conn):
     cur = conn.cursor()
 
     avisos = []
@@ -537,24 +550,27 @@ def init_db():
                 f"(Nutrição/Odontologia) importados automaticamente em lote."
             )
 
-    conn.close()
-    _ja_inicializado = {"info": avisos, "erros": erros}
-    return _ja_inicializado
+    conn.commit()
+    return {"info": avisos, "erros": erros}
 
 
 @st.cache_data(ttl=30)
 def listar_medicos():
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM medicos ORDER BY nome").fetchall()
-    conn.close()
+    try:
+        rows = conn.execute("SELECT * FROM medicos ORDER BY nome").fetchall()
+    finally:
+        conn.close()
     return [dict(r) for r in rows]
 
 
 @st.cache_data(ttl=30)
 def buscar_medico(nome: str):
     conn = get_conn()
-    row = conn.execute("SELECT * FROM medicos WHERE nome = ?", (nome,)).fetchone()
-    conn.close()
+    try:
+        row = conn.execute("SELECT * FROM medicos WHERE nome = ?", (nome,)).fetchone()
+    finally:
+        conn.close()
     return dict(row) if row else None
 
 
@@ -572,18 +588,19 @@ def adicionar_medico(nome: str, especialidade: str, cod: str, meta):
         return False, f"Já existe um médico cadastrado com o nome '{nome}'."
 
     conn = get_conn()
-    cur = conn.cursor()
     try:
-        cur.execute(
-            "INSERT INTO medicos (nome, especialidade, cod, meta) VALUES (?,?,?,?)",
-            (nome, (especialidade or "").strip(), (cod or "").strip(), meta)
-        )
-        conn.commit()
-    except psycopg2.Error as e:
-        conn.rollback()
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO medicos (nome, especialidade, cod, meta) VALUES (?,?,?,?)",
+                (nome, (especialidade or "").strip(), (cod or "").strip(), meta)
+            )
+            conn.commit()
+        except psycopg2.Error as e:
+            conn.rollback()
+            return False, f"Não foi possível salvar: {e}"
+    finally:
         conn.close()
-        return False, f"Não foi possível salvar: {e}"
-    conn.close()
     _limpar_cache()
     return True, None
 
@@ -592,9 +609,11 @@ def remover_medico(nome: str):
     """Remove um médico da lista de cadastro (não apaga atendimentos já
     lançados em seu nome, apenas tira das opções do formulário)."""
     conn = get_conn()
-    conn.execute("DELETE FROM medicos WHERE nome = ?", (nome,))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("DELETE FROM medicos WHERE nome = ?", (nome,))
+        conn.commit()
+    finally:
+        conn.close()
     _limpar_cache()
 
 
@@ -616,49 +635,51 @@ def salvar_atendimento(nr_cras, data_atendimento: date, medico, turno, usuario,
     servidor = "Sim" if categoria == "servidor" else "Não"
 
     conn = get_conn()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
 
-    # Ordem: quantos atendimentos esse usuário já teve (equivalente à fórmula COUNTIFS da coluna F)
-    ordem = cur.execute(
-        "SELECT COUNT(*) FROM ficha WHERE nome_usuario = ?", (usuario,)
-    ).fetchone()[0] + 1
+        # Ordem: quantos atendimentos esse usuário já teve (equivalente à fórmula COUNTIFS da coluna F)
+        ordem = cur.execute(
+            "SELECT COUNT(*) FROM ficha WHERE nome_usuario = ?", (usuario,)
+        ).fetchone()[0] + 1
 
-    cur.execute("""
-        INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
-                            especialidade, matricula, nome_usuario, assistido, servidor,
-                            consulta, status, criado_em)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (nr_cras, data_atendimento.isoformat(), nome_mes(data_atendimento),
-          nome_dia(data_atendimento), turno, ordem, medico, especialidade,
-          nr_matricula, usuario, assistido, servidor, consulta, "Realizado",
-          datetime.now().isoformat(timespec="seconds")))
+        cur.execute("""
+            INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
+                                especialidade, matricula, nome_usuario, assistido, servidor,
+                                consulta, status, criado_em)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (nr_cras, data_atendimento.isoformat(), nome_mes(data_atendimento),
+              nome_dia(data_atendimento), turno, ordem, medico, especialidade,
+              nr_matricula, usuario, assistido, servidor, consulta, "Realizado",
+              datetime.now().isoformat(timespec="seconds")))
 
-    # Base: um registro agregado por (data, médico). Usa UPSERT atômico
-    # (INSERT ... ON CONFLICT) em vez de "verificar se existe, depois inserir
-    # ou atualizar" — esse padrão em dois passos tem uma condição de corrida
-    # real quando duas pessoas salvam pro mesmo dia/médico ao mesmo tempo.
-    meta = med["meta"] if med else None
-    campo = {"assistido": "discentes_assistidos",
-             "discente": "discentes_naoassistidos",
-             "servidor": "atendidos_servidores"}[categoria]
+        # Base: um registro agregado por (data, médico). Usa UPSERT atômico
+        # (INSERT ... ON CONFLICT) em vez de "verificar se existe, depois inserir
+        # ou atualizar" — esse padrão em dois passos tem uma condição de corrida
+        # real quando duas pessoas salvam pro mesmo dia/médico ao mesmo tempo.
+        meta = med["meta"] if med else None
+        campo = {"assistido": "discentes_assistidos",
+                 "discente": "discentes_naoassistidos",
+                 "servidor": "atendidos_servidores"}[categoria]
 
-    cur.execute(f"""
-        INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
-                           discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
-                           total_atendidos, meta)
-        VALUES (?,?,?,?,?,?,?,?,?,1,?)
-        ON CONFLICT (data, medico) DO UPDATE SET
-            {campo} = base.{campo} + 1,
-            total_atendidos = base.total_atendidos + 1
-    """, (data_atendimento.isoformat(), nome_mes(data_atendimento),
-          nome_dia(data_atendimento), medico, especialidade, cod_medico,
-          1 if categoria == "assistido" else 0,
-          1 if categoria == "discente" else 0,
-          1 if categoria == "servidor" else 0,
-          meta))
+        cur.execute(f"""
+            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                               discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
+                               total_atendidos, meta)
+            VALUES (?,?,?,?,?,?,?,?,?,1,?)
+            ON CONFLICT (data, medico) DO UPDATE SET
+                {campo} = base.{campo} + 1,
+                total_atendidos = base.total_atendidos + 1
+        """, (data_atendimento.isoformat(), nome_mes(data_atendimento),
+              nome_dia(data_atendimento), medico, especialidade, cod_medico,
+              1 if categoria == "assistido" else 0,
+              1 if categoria == "discente" else 0,
+              1 if categoria == "servidor" else 0,
+              meta))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
     _limpar_cache()
 
 
@@ -680,33 +701,35 @@ def registrar_dia(data_ref: date, medico: str, turno: str, motivo: str):
     codigo_falta = {"Presença": 0, "Falta": 1, "Feriado": 2}[motivo]
 
     conn = get_conn()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
 
-    cur.execute("""
-        INSERT INTO ficha (data, mes, dia_semana, turno, medico, especialidade,
-                            assistido, servidor, status, motivo, criado_em)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref), turno,
-          medico, especialidade, "Não", "Não", status, motivo,
-          datetime.now().isoformat(timespec="seconds")))
+        cur.execute("""
+            INSERT INTO ficha (data, mes, dia_semana, turno, medico, especialidade,
+                                assistido, servidor, status, motivo, criado_em)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref), turno,
+              medico, especialidade, "Não", "Não", status, motivo,
+              datetime.now().isoformat(timespec="seconds")))
 
-    meta = med["meta"] if med else None
-    incremento_faltosos = 0 if motivo == "Presença" else 1
+        meta = med["meta"] if med else None
+        incremento_faltosos = 0 if motivo == "Presença" else 1
 
-    cur.execute("""
-        INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
-                           faltosos, falta_profissional, meta)
-        VALUES (?,?,?,?,?,?,?,?,?)
-        ON CONFLICT (data, medico) DO UPDATE SET
-            faltosos = base.faltosos + ?,
-            falta_profissional = ?
-    """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref),
-          medico, especialidade, cod_medico, incremento_faltosos,
-          codigo_falta, meta,
-          incremento_faltosos, codigo_falta))
+        cur.execute("""
+            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                               faltosos, falta_profissional, meta)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT (data, medico) DO UPDATE SET
+                faltosos = base.faltosos + ?,
+                falta_profissional = ?
+        """, (data_ref.isoformat(), nome_mes(data_ref), nome_dia(data_ref),
+              medico, especialidade, cod_medico, incremento_faltosos,
+              codigo_falta, meta,
+              incremento_faltosos, codigo_falta))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
     _limpar_cache()
 
 
@@ -722,14 +745,16 @@ def get_atendimentos_do_dia(data_ref: date, medico: str | None = None):
     resolvido — não fazem parte da revisão do dia a dia; para achar/excluir
     um deles, use a busca)."""
     conn = get_conn()
-    q = "SELECT * FROM ficha WHERE data = ? AND turno IS NOT NULL AND turno != ''"
-    params = [data_ref.isoformat()]
-    if medico:
-        q += " AND medico = ?"
-        params.append(medico)
-    q += " ORDER BY turno, nome_usuario"
-    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
-    conn.close()
+    try:
+        q = "SELECT * FROM ficha WHERE data = ? AND turno IS NOT NULL AND turno != ''"
+        params = [data_ref.isoformat()]
+        if medico:
+            q += " AND medico = ?"
+            params.append(medico)
+        q += " ORDER BY turno, nome_usuario"
+        rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    finally:
+        conn.close()
     return rows
 
 
@@ -742,29 +767,31 @@ def buscar_atendimentos(medico: str | None = None, data_inicio: date | None = No
     só um deles.
     """
     conn = get_conn()
-    condicoes = []
-    params = []
+    try:
+        condicoes = []
+        params = []
 
-    if medico:
-        condicoes.append("medico = ?")
-        params.append(medico)
-    if data_inicio:
-        condicoes.append("data >= ?")
-        params.append(data_inicio.isoformat())
-    if data_fim:
-        condicoes.append("data <= ?")
-        params.append(data_fim.isoformat())
-    if nome_paciente:
-        condicoes.append("nome_usuario ILIKE ?")
-        params.append(f"%{nome_paciente}%")
+        if medico:
+            condicoes.append("medico = ?")
+            params.append(medico)
+        if data_inicio:
+            condicoes.append("data >= ?")
+            params.append(data_inicio.isoformat())
+        if data_fim:
+            condicoes.append("data <= ?")
+            params.append(data_fim.isoformat())
+        if nome_paciente:
+            condicoes.append("nome_usuario ILIKE ?")
+            params.append(f"%{nome_paciente}%")
 
-    q = "SELECT * FROM ficha"
-    if condicoes:
-        q += " WHERE " + " AND ".join(condicoes)
-    q += " ORDER BY data DESC, turno, nome_usuario"
+        q = "SELECT * FROM ficha"
+        if condicoes:
+            q += " WHERE " + " AND ".join(condicoes)
+        q += " ORDER BY data DESC, turno, nome_usuario"
 
-    rows = [dict(r) for r in conn.execute(q, params).fetchall()]
-    conn.close()
+        rows = [dict(r) for r in conn.execute(q, params).fetchall()]
+    finally:
+        conn.close()
     return rows
 
 
@@ -784,59 +811,59 @@ def atualizar_status_atendimento(ficha_id: int, novo_status: str):
     acordo — assim o Dashboard e o Mapa continuam corretos.
     """
     conn = get_conn()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
 
-    row = cur.execute("SELECT * FROM ficha WHERE id = ?", (ficha_id,)).fetchone()
-    if row is None:
+        row = cur.execute("SELECT * FROM ficha WHERE id = ?", (ficha_id,)).fetchone()
+        if row is None:
+            return False
+        row = dict(row)
+        status_antigo = row["status"] or "Realizado"
+
+        if status_antigo == novo_status:
+            return True
+
+        cur.execute("UPDATE ficha SET status = ? WHERE id = ?", (novo_status, ficha_id))
+
+        base_row = cur.execute(
+            "SELECT * FROM base WHERE data = ? AND medico = ?",
+            (row["data"], row["medico"])
+        ).fetchone()
+
+        if base_row is not None:
+            sem_paciente = not row.get("nome_usuario")
+            era_realizado = status_antigo == "Realizado"
+            fica_realizado = novo_status == "Realizado"
+
+            if sem_paciente:
+                # Marcador de presença/falta (sem dados de paciente) — só mexe
+                # em 'faltosos', nunca em total_atendidos nem nas categorias.
+                if era_realizado and not fica_realizado:
+                    cur.execute("UPDATE base SET faltosos = faltosos + 1 WHERE id = ?", (base_row["id"],))
+                elif not era_realizado and fica_realizado:
+                    cur.execute("UPDATE base SET faltosos = GREATEST(faltosos - 1, 0) WHERE id = ?",
+                                (base_row["id"],))
+            else:
+                campo = _campo_categoria(row)
+                if era_realizado and not fica_realizado:
+                    cur.execute(f"""
+                        UPDATE base SET {campo} = GREATEST({campo} - 1, 0),
+                                         total_atendidos = GREATEST(total_atendidos - 1, 0),
+                                         faltosos = faltosos + 1
+                        WHERE id = ?
+                    """, (base_row["id"],))
+                elif not era_realizado and fica_realizado:
+                    cur.execute(f"""
+                        UPDATE base SET {campo} = {campo} + 1,
+                                         total_atendidos = total_atendidos + 1,
+                                         faltosos = GREATEST(faltosos - 1, 0)
+                        WHERE id = ?
+                    """, (base_row["id"],))
+            # se trocou entre dois motivos de falta diferentes, os totais não mudam
+
+        conn.commit()
+    finally:
         conn.close()
-        return False
-    row = dict(row)
-    status_antigo = row["status"] or "Realizado"
-
-    if status_antigo == novo_status:
-        conn.close()
-        return True
-
-    cur.execute("UPDATE ficha SET status = ? WHERE id = ?", (novo_status, ficha_id))
-
-    base_row = cur.execute(
-        "SELECT * FROM base WHERE data = ? AND medico = ?",
-        (row["data"], row["medico"])
-    ).fetchone()
-
-    if base_row is not None:
-        sem_paciente = not row.get("nome_usuario")
-        era_realizado = status_antigo == "Realizado"
-        fica_realizado = novo_status == "Realizado"
-
-        if sem_paciente:
-            # Marcador de presença/falta (sem dados de paciente) — só mexe
-            # em 'faltosos', nunca em total_atendidos nem nas categorias.
-            if era_realizado and not fica_realizado:
-                cur.execute("UPDATE base SET faltosos = faltosos + 1 WHERE id = ?", (base_row["id"],))
-            elif not era_realizado and fica_realizado:
-                cur.execute("UPDATE base SET faltosos = GREATEST(faltosos - 1, 0) WHERE id = ?",
-                            (base_row["id"],))
-        else:
-            campo = _campo_categoria(row)
-            if era_realizado and not fica_realizado:
-                cur.execute(f"""
-                    UPDATE base SET {campo} = GREATEST({campo} - 1, 0),
-                                     total_atendidos = GREATEST(total_atendidos - 1, 0),
-                                     faltosos = faltosos + 1
-                    WHERE id = ?
-                """, (base_row["id"],))
-            elif not era_realizado and fica_realizado:
-                cur.execute(f"""
-                    UPDATE base SET {campo} = {campo} + 1,
-                                     total_atendidos = total_atendidos + 1,
-                                     faltosos = GREATEST(faltosos - 1, 0)
-                    WHERE id = ?
-                """, (base_row["id"],))
-        # se trocou entre dois motivos de falta diferentes, os totais não mudam
-
-    conn.commit()
-    conn.close()
     _limpar_cache()
     return True
 
@@ -845,13 +872,15 @@ def atualizar_status_atendimento(ficha_id: int, novo_status: str):
 def contar_nao_realizados(medico: str, data_ref: date, turno: str | None = None):
     """Quantos atendimentos desse dia/médico(/turno) NÃO foram realizados."""
     conn = get_conn()
-    q = "SELECT COUNT(*) FROM ficha WHERE medico = ? AND data = ? AND status != 'Realizado'"
-    params = [medico, data_ref.isoformat()]
-    if turno:
-        q += " AND turno = ?"
-        params.append(turno)
-    n = conn.execute(q, params).fetchone()[0]
-    conn.close()
+    try:
+        q = "SELECT COUNT(*) FROM ficha WHERE medico = ? AND data = ? AND status != 'Realizado'"
+        params = [medico, data_ref.isoformat()]
+        if turno:
+            q += " AND turno = ?"
+            params.append(turno)
+        n = conn.execute(q, params).fetchone()[0]
+    finally:
+        conn.close()
     return n
 
 
@@ -863,36 +892,37 @@ def excluir_atendimento(ficha_id: int):
     Retorna True se excluiu, False se o registro não foi encontrado.
     """
     conn = get_conn()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
 
-    row = cur.execute("SELECT * FROM ficha WHERE id = ?", (ficha_id,)).fetchone()
-    if row is None:
+        row = cur.execute("SELECT * FROM ficha WHERE id = ?", (ficha_id,)).fetchone()
+        if row is None:
+            return False
+        row = dict(row)
+
+        base_row = cur.execute(
+            "SELECT * FROM base WHERE data = ? AND medico = ?",
+            (row["data"], row["medico"])
+        ).fetchone()
+
+        if base_row is not None:
+            if row["status"] == "Realizado":
+                if row.get("nome_usuario"):
+                    campo = _campo_categoria(row)
+                    cur.execute(f"""
+                        UPDATE base SET {campo} = GREATEST({campo} - 1, 0),
+                                         total_atendidos = GREATEST(total_atendidos - 1, 0)
+                        WHERE id = ?
+                    """, (base_row["id"],))
+                # marcador de presença sem paciente: nada a decrementar aqui
+            else:
+                cur.execute("UPDATE base SET faltosos = GREATEST(faltosos - 1, 0) WHERE id = ?",
+                            (base_row["id"],))
+
+        cur.execute("DELETE FROM ficha WHERE id = ?", (ficha_id,))
+        conn.commit()
+    finally:
         conn.close()
-        return False
-    row = dict(row)
-
-    base_row = cur.execute(
-        "SELECT * FROM base WHERE data = ? AND medico = ?",
-        (row["data"], row["medico"])
-    ).fetchone()
-
-    if base_row is not None:
-        if row["status"] == "Realizado":
-            if row.get("nome_usuario"):
-                campo = _campo_categoria(row)
-                cur.execute(f"""
-                    UPDATE base SET {campo} = GREATEST({campo} - 1, 0),
-                                     total_atendidos = GREATEST(total_atendidos - 1, 0)
-                    WHERE id = ?
-                """, (base_row["id"],))
-            # marcador de presença sem paciente: nada a decrementar aqui
-        else:
-            cur.execute("UPDATE base SET faltosos = GREATEST(faltosos - 1, 0) WHERE id = ?",
-                        (base_row["id"],))
-
-    cur.execute("DELETE FROM ficha WHERE id = ?", (ficha_id,))
-    conn.commit()
-    conn.close()
     _limpar_cache()
     return True
 
@@ -904,31 +934,32 @@ def forcar_reseed_base():
     if not BASE_HISTORICO_SEED.exists():
         return 0
     conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM base")
-    if cur.fetchone()[0] > 0:
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM base")
+        if cur.fetchone()[0] > 0:
+            return 0
+        registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
+        cur.execute_values("""
+            INSERT INTO base
+                (data, mes, dia_semana, medico, especialidade, cod_medico,
+                 discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
+                 faltosos, falta_profissional, agendados, total_atendidos, meta,
+                 absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
+            VALUES %s
+            ON CONFLICT (data, medico) DO NOTHING
+        """, [
+            (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
+             r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
+             r["faltosos"], r["falta_profissional"], r["agendados"], r["total_atendidos"], r["meta"],
+             r["absenteismo"], r["ocupacao"], r["classif_absenteismo"], r["classif_ocupacao"],
+             r["classif_desempenho"])
+            for r in registros
+        ])
+        conn.commit()
+        n = len(registros)
+    finally:
         conn.close()
-        return 0
-    registros = json.loads(BASE_HISTORICO_SEED.read_text(encoding="utf-8"))
-    cur.execute_values("""
-        INSERT INTO base
-            (data, mes, dia_semana, medico, especialidade, cod_medico,
-             discentes_assistidos, discentes_naoassistidos, atendidos_servidores,
-             faltosos, falta_profissional, agendados, total_atendidos, meta,
-             absenteismo, ocupacao, classif_absenteismo, classif_ocupacao, classif_desempenho)
-        VALUES %s
-        ON CONFLICT (data, medico) DO NOTHING
-    """, [
-        (r["data"], r["mes"], r["dia_semana"], r["medico"], r["especialidade"], r["cod_medico"],
-         r["discentes_assistidos"], r["discentes_naoassistidos"], r["atendidos_servidores"],
-         r["faltosos"], r["falta_profissional"], r["agendados"], r["total_atendidos"], r["meta"],
-         r["absenteismo"], r["ocupacao"], r["classif_absenteismo"], r["classif_ocupacao"],
-         r["classif_desempenho"])
-        for r in registros
-    ])
-    conn.commit()
-    n = len(registros)
-    conn.close()
     _limpar_cache()
     return n
 
@@ -968,17 +999,21 @@ def get_base_df():
 @st.cache_data(ttl=30)
 def get_config(chave, default=""):
     conn = get_conn()
-    row = conn.execute("SELECT valor FROM config WHERE chave = ?", (chave,)).fetchone()
-    conn.close()
+    try:
+        row = conn.execute("SELECT valor FROM config WHERE chave = ?", (chave,)).fetchone()
+    finally:
+        conn.close()
     return row["valor"] if row else default
 
 
 def set_config(chave, valor):
     conn = get_conn()
-    conn.execute("INSERT INTO config (chave, valor) VALUES (?, ?) "
-                 "ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor", (chave, valor))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("INSERT INTO config (chave, valor) VALUES (?, ?) "
+                     "ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor", (chave, valor))
+        conn.commit()
+    finally:
+        conn.close()
     _limpar_cache()
 
 
@@ -993,15 +1028,17 @@ def gerar_backup_json():
     e-mail, etc.), já que o disco do Streamlit Cloud é temporário.
     """
     conn = get_conn()
-    dump = {
-        "versao": 1,
-        "gerado_em": datetime.now().isoformat(timespec="seconds"),
-        "tabelas": {},
-    }
-    for tabela in TABELAS_BACKUP:
-        rows = conn.execute(f"SELECT * FROM {tabela}").fetchall()
-        dump["tabelas"][tabela] = [dict(r) for r in rows]
-    conn.close()
+    try:
+        dump = {
+            "versao": 1,
+            "gerado_em": datetime.now().isoformat(timespec="seconds"),
+            "tabelas": {},
+        }
+        for tabela in TABELAS_BACKUP:
+            rows = conn.execute(f"SELECT * FROM {tabela}").fetchall()
+            dump["tabelas"][tabela] = [dict(r) for r in rows]
+    finally:
+        conn.close()
     return json.dumps(dump, ensure_ascii=False, indent=1).encode("utf-8")
 
 
@@ -1048,13 +1085,15 @@ def get_mapa_atendimento(medico: str, data_sel: date, turno: str | None):
     Marcadores de presença sem paciente (feitos por registrar_dia) não
     entram aqui, pois não representam um atendimento de fato."""
     conn = get_conn()
-    q = ("SELECT * FROM ficha WHERE medico = ? AND data = ? AND status = 'Realizado' "
-         "AND nome_usuario IS NOT NULL AND nome_usuario != ''")
-    params = [medico, data_sel.isoformat()]
-    if turno:
-        q += " AND turno = ?"
-        params.append(turno)
-    q += " ORDER BY id"
-    rows = conn.execute(q, params).fetchall()
-    conn.close()
+    try:
+        q = ("SELECT * FROM ficha WHERE medico = ? AND data = ? AND status = 'Realizado' "
+             "AND nome_usuario IS NOT NULL AND nome_usuario != ''")
+        params = [medico, data_sel.isoformat()]
+        if turno:
+            q += " AND turno = ?"
+            params.append(turno)
+        q += " ORDER BY id"
+        rows = conn.execute(q, params).fetchall()
+    finally:
+        conn.close()
     return [dict(r) for r in rows]
