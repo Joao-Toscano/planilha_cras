@@ -17,6 +17,7 @@ from datetime import date, datetime
 MEDICOS_SEED = Path(__file__).parent / "data" / "medicos.json"
 BASE_HISTORICO_SEED = Path(__file__).parent / "data" / "base_historico.json"
 AGENDAS_SEED = Path(__file__).parent / "data" / "agendas_2026.json"
+FALTAS_SEED = Path(__file__).parent / "data" / "faltas_profissionais_2026.json"
 
 NOMES_MES = ["Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
              "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
@@ -548,6 +549,77 @@ def _init_db_interno(conn):
                 f"{len(dados_agenda.get('atendimentos', []))} atendimentos e "
                 f"{len(dados_agenda.get('dias_especiais', []))} dias especiais das agendas 2026 "
                 f"(Nutrição/Odontologia) importados automaticamente em lote."
+            )
+
+    # Importa as faltas profissionais do relatório anual de diagnóstico —
+    # mesma lógica (uma vez só, em lote, marcado por uma flag no config).
+    # Os dias que já tinham vindo da agenda mensal (Férias/Atestado) foram
+    # excluídos deste arquivo antes de gerar o JSON, para não contar em dobro.
+    if FALTAS_SEED.exists():
+        ja_importado_faltas = cur.execute(
+            "SELECT valor FROM config WHERE chave = 'faltas_profissionais_2026_importadas'"
+        ).fetchone()
+        if not ja_importado_faltas:
+            faltas = json.loads(FALTAS_SEED.read_text(encoding="utf-8"))
+            medicos_cache2 = {m["nome"]: m for m in
+                              [dict(r) for r in cur.execute("SELECT * FROM medicos")]}
+
+            linhas_ficha_falta = []
+            deltas_falta = {}
+            for f in faltas:
+                med = medicos_cache2.get(f["medico"], {})
+                data_obj = date.fromisoformat(f["data"])
+                linhas_ficha_falta.append((
+                    None, f["data"], nome_mes(data_obj), nome_dia(data_obj), "",
+                    None, f["medico"], med.get("especialidade") or "", None, None,
+                    "Não", "Não", None, "Falta do profissional", f["motivo"],
+                    datetime.now().isoformat(timespec="seconds"),
+                ))
+                chave = (f["data"], f["medico"])
+                if chave not in deltas_falta:
+                    deltas_falta[chave] = {
+                        "especialidade": med.get("especialidade") or "",
+                        "cod_medico": med.get("cod") or "",
+                        "meta": med.get("meta"),
+                        "faltosos": 0,
+                        "falta_profissional": 0,
+                    }
+                deltas_falta[chave]["faltosos"] += 1
+                deltas_falta[chave]["falta_profissional"] = 1 if f["motivo"] == "Falta" else 2
+
+            if linhas_ficha_falta:
+                cur.execute_values("""
+                    INSERT INTO ficha (nr_cras, data, mes, dia_semana, turno, ordem, medico,
+                                        especialidade, matricula, nome_usuario, assistido,
+                                        servidor, consulta, status, motivo, criado_em)
+                    VALUES %s
+                """, linhas_ficha_falta)
+                conn.commit()
+
+            linhas_base_falta = []
+            for (data_iso, medico), d in deltas_falta.items():
+                data_obj = date.fromisoformat(data_iso)
+                linhas_base_falta.append((
+                    data_iso, nome_mes(data_obj), nome_dia(data_obj), medico,
+                    d["especialidade"], d["cod_medico"],
+                    d["faltosos"], d["falta_profissional"], d["meta"],
+                ))
+            if linhas_base_falta:
+                cur.execute_values("""
+                    INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                                       faltosos, falta_profissional, meta)
+                    VALUES %s
+                    ON CONFLICT (data, medico) DO UPDATE SET
+                        faltosos = base.faltosos + EXCLUDED.faltosos,
+                        falta_profissional = EXCLUDED.falta_profissional
+                """, linhas_base_falta)
+                conn.commit()
+
+            set_config("faltas_profissionais_2026_importadas",
+                       datetime.now().isoformat(timespec="seconds"))
+            avisos.append(
+                f"{len(faltas)} faltas profissionais (relatório anual de diagnóstico) "
+                f"importadas automaticamente em lote."
             )
 
     conn.commit()
