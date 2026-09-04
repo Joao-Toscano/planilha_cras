@@ -759,7 +759,9 @@ def registrar_dia(data_ref: date, medico: str, turno: str, motivo: str):
     """
     Registra um dia/turno só com médico + situação, sem dados de paciente —
     para marcar rapidamente a presença do profissional nesse turno.
-    motivo: 'Presença' | 'Falta' | 'Feriado'
+    motivo: 'Presença' | 'Falta' | 'Férias/Feriado' (aceita também o texto
+    antigo 'Feriado', usado antes de trocarmos o rótulo — não mexe nos
+    registros já salvos, só nos que forem lançados a partir de agora).
     Aparece na revisão do dia (com nome em branco) e o status pode ser
     trocado depois, igual a qualquer outro lançamento.
     Não soma em nenhuma categoria de atendimento (Servidor/Discente/etc) —
@@ -770,7 +772,7 @@ def registrar_dia(data_ref: date, medico: str, turno: str, motivo: str):
     especialidade = med["especialidade"] if med else ""
     cod_medico = med["cod"] if med else ""
     status = "Realizado" if motivo == "Presença" else "Falta do profissional"
-    codigo_falta = {"Presença": 0, "Falta": 1, "Feriado": 2}[motivo]
+    codigo_falta = {"Presença": 0, "Falta": 1, "Feriado": 2, "Férias/Feriado": 2}[motivo]
 
     conn = get_conn()
     try:

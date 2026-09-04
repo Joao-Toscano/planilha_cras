@@ -239,7 +239,7 @@ if pagina == "📝 Lançamento Diário":
                                           key="data_dia")
             with cold3:
                 turno_dia = st.selectbox("Turno", ["MANHÃ", "TARDE"], key="turno_dia")
-            veio = st.radio("Situação do profissional", ["Presença", "Falta", "Feriado"],
+            veio = st.radio("Situação do profissional", ["Presença", "Falta", "Férias/Feriado"],
                             horizontal=True)
             enviar_dia = st.form_submit_button("Registrar")
 
@@ -349,7 +349,6 @@ if pagina == "📝 Lançamento Diário":
         df_rev = pd.DataFrame(registros).set_index("id")
         df_rev["nome_usuario"] = df_rev["nome_usuario"].fillna("").replace(
             "", "(sem paciente — marcador de presença)")
-        df_rev["motivo"] = df_rev["motivo"].fillna("")
         df_rev["consulta"] = df_rev["consulta"].fillna("")
 
         def _categoria(linha):
@@ -365,9 +364,9 @@ if pagina == "📝 Lançamento Diário":
         df_rev["categoria"] = df_rev.apply(_categoria, axis=1)
 
         df_rev_exibir = df_rev[["medico", "turno", "nome_usuario", "matricula",
-                                 "consulta", "categoria", "motivo", "status"]].copy()
+                                 "consulta", "categoria", "status"]].copy()
         df_rev_exibir.columns = ["Médico", "Turno", "Nome do usuário", "Matrícula",
-                                  "Tipo de Consulta", "Categoria", "Motivo", "Status"]
+                                  "Tipo de Consulta", "Categoria", "Status"]
 
         editado = st.data_editor(
             df_rev_exibir,
@@ -377,7 +376,7 @@ if pagina == "📝 Lançamento Diário":
                 ),
             },
             disabled=["Médico", "Turno", "Nome do usuário", "Matrícula",
-                      "Tipo de Consulta", "Categoria", "Motivo"],
+                      "Tipo de Consulta", "Categoria"],
             width='stretch',
             key="editor_atendimentos_dia",
         )
