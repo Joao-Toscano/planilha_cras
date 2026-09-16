@@ -1057,19 +1057,53 @@ def _aplicar_contribuicao_base(cur, novos, medicos_cache):
               especialidade, cod_medico, meta))
 
 
+COR_AMARELO = "FFFFFF00"
+CAMPOS_EDITAVEIS_FICHA = ["nr_cras", "data", "turno", "medico", "especialidade", "matricula",
+                          "nome_usuario", "assistido", "servidor", "consulta", "status", "motivo"]
+
+
+def _normalizar_valor_planilha(v):
+    """Compara valores de forma tolerante a diferenças de formatação que não
+    são mudanças de verdade — matrícula/Nº CRAS vêm do Excel como float
+    (ex: 202200597460.0) mesmo sendo só um número inteiro por natureza."""
+    if v is None:
+        return ""
+    try:
+        import math
+        if isinstance(v, float):
+            if math.isnan(v):
+                return ""
+            if v.is_integer():
+                return str(int(v))
+            return str(v)
+    except Exception:
+        pass
+    return str(v).strip()
+
+
 def analisar_planilha_ficha(caminho_arquivo):
     """
-    Lê uma planilha exportada da aba Ficha (precisa ter a coluna 'id'),
-    já com correções feitas nela, e compara com o que está no banco AGORA.
-    Não altera nada — só monta um plano pra você conferir antes de aplicar.
+    Lê uma planilha exportada da aba Ficha (precisa ter a coluna 'id'), com
+    as correções já feitas, e monta um plano de mudanças SEM alterar nada
+    ainda. Só conta como mudança uma célula que estiver:
+    1) pintada de amarelo (destaque de "isso eu mexi"), E
+    2) com um valor que realmente é diferente do que já está no banco
+       (ignora diferenças só de formatação, tipo "123.0" vs "123").
+    Células sem pintura são ignoradas, mesmo que o valor pareça diferente —
+    só o que foi destacado é considerado uma correção intencional.
 
-    Convenções especiais na planilha:
-    - status = 'EXCLUIR' (não importa maiúsculas/espaços) → marca a linha
-      pra ser excluída de vez.
-    - status em branco → ignorada (não dá pra saber a intenção).
+    Convenção especial: se a célula de 'status' estiver pintada de amarelo
+    E o texto for 'EXCLUIR' (não importa maiúsculas/espaços), a linha
+    inteira é marcada para ser excluída do banco.
     """
-    import pandas as pd
-    df = pd.read_excel(caminho_arquivo)
+    import openpyxl
+    wb = openpyxl.load_workbook(caminho_arquivo, data_only=True)
+    ws = wb.active
+
+    header = [c.value for c in ws[1]]
+    col_idx = {h: i + 1 for i, h in enumerate(header) if h}
+    if "id" not in col_idx or "status" not in col_idx:
+        raise ValueError("A planilha precisa ter as colunas 'id' e 'status' (exportada da Ficha).")
 
     conn = get_conn()
     try:
@@ -1080,56 +1114,47 @@ def analisar_planilha_ficha(caminho_arquivo):
 
     plano = {"excluir": [], "atualizar": [], "sem_mudanca": 0, "ignorados": []}
 
-    def _limpo(v):
-        return None if pd.isna(v) else v
+    def _pintada_amarelo(linha_excel, campo):
+        col = col_idx.get(campo)
+        if col is None:
+            return False
+        fill = ws.cell(row=linha_excel, column=col).fill
+        return bool(fill and fill.fgColor and fill.fgColor.rgb == COR_AMARELO)
 
-    def _norm(v):
-        return "" if v is None else str(v).strip()
-
-    campos_comparar = ["nr_cras", "data", "turno", "medico", "matricula", "nome_usuario",
-                        "assistido", "servidor", "consulta", "status"]
-
-    for _, linha in df.iterrows():
-        if pd.isna(linha.get("id")):
+    for r in range(2, ws.max_row + 1):
+        id_cell = ws.cell(row=r, column=col_idx["id"])
+        if id_cell.value is None:
             continue
-        ficha_id = int(linha["id"])
+        ficha_id = int(id_cell.value)
         atual = atuais.get(ficha_id)
         if atual is None:
             plano["ignorados"].append({"id": ficha_id, "motivo": "não encontrado no banco"})
             continue
 
-        status_planilha = _norm(linha.get("status"))
-        if status_planilha.upper() == "EXCLUIR":
+        status_val = ws.cell(row=r, column=col_idx["status"]).value
+        if _pintada_amarelo(r, "status") and str(status_val or "").strip().upper() == "EXCLUIR":
             plano["excluir"].append(atual)
             continue
-        if not status_planilha:
-            plano["ignorados"].append({"id": ficha_id, "motivo": "status em branco na planilha"})
-            continue
 
-        data_nova = linha.get("data")
-        if hasattr(data_nova, "date"):
-            data_nova = data_nova.date().isoformat()
-        elif isinstance(data_nova, str) and data_nova:
-            data_nova = data_nova[:10]
-        else:
-            data_nova = atual["data"]
+        campos_alterados = []
+        novos = dict(atual)
+        for campo in CAMPOS_EDITAVEIS_FICHA:
+            if campo not in col_idx or not _pintada_amarelo(r, campo):
+                continue
+            valor_cel = ws.cell(row=r, column=col_idx[campo]).value
+            if campo == "data" and valor_cel is not None:
+                if hasattr(valor_cel, "date"):
+                    valor_cel = valor_cel.date().isoformat()
+                elif isinstance(valor_cel, str):
+                    valor_cel = valor_cel[:10]
+            valor_normalizado = _normalizar_valor_planilha(valor_cel)
+            if _normalizar_valor_planilha(atual.get(campo)) != valor_normalizado:
+                novos[campo] = valor_normalizado if valor_normalizado != "" else None
+                campos_alterados.append(campo)
 
-        novos = {
-            "nr_cras": _limpo(linha.get("nr_cras")),
-            "data": data_nova,
-            "turno": _limpo(linha.get("turno")) or "",
-            "medico": _limpo(linha.get("medico")) or atual["medico"],
-            "matricula": _limpo(linha.get("matricula")),
-            "nome_usuario": _limpo(linha.get("nome_usuario")),
-            "assistido": _limpo(linha.get("assistido")) or "Não",
-            "servidor": _limpo(linha.get("servidor")) or "Não",
-            "consulta": _limpo(linha.get("consulta")),
-            "status": status_planilha,
-        }
-
-        mudou = any(_norm(atual.get(c)) != _norm(novos.get(c)) for c in campos_comparar)
-        if mudou:
-            plano["atualizar"].append({"id": ficha_id, "antes": atual, "depois": novos})
+        if campos_alterados:
+            plano["atualizar"].append({"id": ficha_id, "antes": atual, "depois": novos,
+                                        "campos_alterados": campos_alterados})
         else:
             plano["sem_mudanca"] += 1
 
