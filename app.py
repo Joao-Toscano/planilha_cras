@@ -758,6 +758,75 @@ elif pagina == "📁 Base de Dados":
                         st.error(f"Não foi possível restaurar: {e}")
 
         st.divider()
+        st.subheader("🔄 Corrigir lançamentos a partir de uma planilha")
+        st.caption(
+            "Baixe a Ficha (aba 'Ficha (todos os atendimentos)' → Baixar CSV, ou exporte "
+            "pra Excel), edite as linhas que precisam de correção, e suba o arquivo aqui. "
+            "Só o que realmente mudou é alterado — o resto fica igual. Pra excluir uma "
+            "linha, escreva **EXCLUIR** na coluna 'status' dela (não apague a linha inteira)."
+        )
+        arquivo_correcao = st.file_uploader("Planilha da Ficha editada (.xlsx)", type=["xlsx"],
+                                             key="upload_correcao_ficha")
+
+        if arquivo_correcao is not None:
+            if st.button("🔍 Analisar mudanças", key="btn_analisar_correcao"):
+                with st.spinner("Comparando com o banco..."):
+                    try:
+                        st.session_state["plano_correcao"] = db.analisar_planilha_ficha(arquivo_correcao)
+                    except Exception as e:
+                        st.error(f"Não foi possível ler a planilha: {e}")
+                        st.session_state.pop("plano_correcao", None)
+
+        if "plano_correcao" in st.session_state:
+            plano = st.session_state["plano_correcao"]
+            st.write(
+                f"**{len(plano['atualizar'])}** para atualizar · "
+                f"**{len(plano['excluir'])}** para excluir · "
+                f"**{plano['sem_mudanca']}** sem mudança · "
+                f"**{len(plano['ignorados'])}** ignorados"
+            )
+
+            if plano["atualizar"]:
+                with st.expander(f"Ver as {len(plano['atualizar'])} atualizações"):
+                    linhas_preview = []
+                    for item in plano["atualizar"]:
+                        campos_mudados = [
+                            c for c in ["nr_cras", "data", "turno", "medico", "matricula",
+                                        "nome_usuario", "assistido", "servidor", "consulta", "status"]
+                            if str(item["antes"].get(c) or "") != str(item["depois"].get(c) or "")
+                        ]
+                        linhas_preview.append({
+                            "id": item["id"],
+                            "Paciente": item["depois"].get("nome_usuario") or "(sem paciente)",
+                            "Campos alterados": ", ".join(campos_mudados),
+                        })
+                    st.dataframe(pd.DataFrame(linhas_preview), width='stretch', hide_index=True)
+
+            if plano["excluir"]:
+                with st.expander(f"Ver os {len(plano['excluir'])} que serão excluídos"):
+                    st.dataframe(
+                        pd.DataFrame([{"id": r["id"], "Data": r["data"], "Médico": r["medico"],
+                                       "Paciente": r.get("nome_usuario") or "(sem paciente)"}
+                                      for r in plano["excluir"]]),
+                        width='stretch', hide_index=True
+                    )
+
+            if plano["ignorados"]:
+                with st.expander(f"Ver os {len(plano['ignorados'])} ignorados (e o motivo)"):
+                    st.dataframe(pd.DataFrame(plano["ignorados"]), width='stretch', hide_index=True)
+
+            if plano["atualizar"] or plano["excluir"]:
+                if st.button("✅ Aplicar essas mudanças", type="primary", key="btn_aplicar_correcao"):
+                    resultado = db.aplicar_sincronizacao_ficha(plano)
+                    st.success(f"Pronto: {resultado['atualizados']} atualizados, "
+                               f"{resultado['excluidos']} excluídos. Os totais da Base já "
+                               f"foram ajustados.")
+                    st.session_state.pop("plano_correcao", None)
+                    st.rerun()
+            else:
+                st.info("Nada para aplicar — a planilha já está igual ao banco.")
+
+        st.divider()
         st.subheader("🔒 Senhas de acesso")
         st.caption("Trocar a senha de um perfil desconecta imediatamente qualquer sessão aberta "
                    "com a senha antiga (é preciso entrar de novo).")

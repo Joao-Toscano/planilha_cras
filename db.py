@@ -1001,6 +1001,180 @@ def excluir_atendimento(ficha_id: int):
     return True
 
 
+def _reverter_contribuicao_base(cur, row):
+    """Desfaz o efeito que um lançamento (no estado 'row') tinha nos totais
+    agregados da tabela 'base' — usado tanto para excluir quanto pra antes
+    de aplicar uma atualização (tira o valor velho antes de somar o novo)."""
+    base_row = cur.execute(
+        "SELECT * FROM base WHERE data = ? AND medico = ?",
+        (row["data"], row["medico"])
+    ).fetchone()
+    if base_row is None:
+        return
+    if row["status"] == "Realizado":
+        if row.get("nome_usuario"):
+            campo = _campo_categoria(row)
+            cur.execute(f"""
+                UPDATE base SET {campo} = GREATEST({campo} - 1, 0),
+                                 total_atendidos = GREATEST(total_atendidos - 1, 0)
+                WHERE id = ?
+            """, (base_row["id"],))
+    else:
+        cur.execute("UPDATE base SET faltosos = GREATEST(faltosos - 1, 0) WHERE id = ?",
+                    (base_row["id"],))
+
+
+def _aplicar_contribuicao_base(cur, novos, medicos_cache):
+    """Soma o efeito de um lançamento (no estado 'novos') nos totais
+    agregados da tabela 'base' — cria a linha do dia/médico se precisar."""
+    med = medicos_cache.get(novos["medico"], {})
+    especialidade = med.get("especialidade") or ""
+    cod_medico = med.get("cod") or ""
+    meta = med.get("meta")
+    data_obj = date.fromisoformat(novos["data"])
+
+    if novos["status"] == "Realizado" and novos.get("nome_usuario"):
+        campo = ("atendidos_servidores" if novos["servidor"] == "Sim"
+                 else "discentes_assistidos" if novos["assistido"] == "Sim"
+                 else "discentes_naoassistidos")
+        cur.execute(f"""
+            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                               {campo}, total_atendidos, meta)
+            VALUES (?,?,?,?,?,?,1,1,?)
+            ON CONFLICT (data, medico) DO UPDATE SET
+                {campo} = base.{campo} + 1,
+                total_atendidos = base.total_atendidos + 1
+        """, (novos["data"], nome_mes(data_obj), nome_dia(data_obj), novos["medico"],
+              especialidade, cod_medico, meta))
+    elif novos["status"] != "Realizado":
+        cur.execute(f"""
+            INSERT INTO base (data, mes, dia_semana, medico, especialidade, cod_medico,
+                               faltosos, meta)
+            VALUES (?,?,?,?,?,?,1,?)
+            ON CONFLICT (data, medico) DO UPDATE SET
+                faltosos = base.faltosos + 1
+        """, (novos["data"], nome_mes(data_obj), nome_dia(data_obj), novos["medico"],
+              especialidade, cod_medico, meta))
+
+
+def analisar_planilha_ficha(caminho_arquivo):
+    """
+    Lê uma planilha exportada da aba Ficha (precisa ter a coluna 'id'),
+    já com correções feitas nela, e compara com o que está no banco AGORA.
+    Não altera nada — só monta um plano pra você conferir antes de aplicar.
+
+    Convenções especiais na planilha:
+    - status = 'EXCLUIR' (não importa maiúsculas/espaços) → marca a linha
+      pra ser excluída de vez.
+    - status em branco → ignorada (não dá pra saber a intenção).
+    """
+    import pandas as pd
+    df = pd.read_excel(caminho_arquivo)
+
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        atuais = {r["id"]: dict(r) for r in cur.execute("SELECT * FROM ficha").fetchall()}
+    finally:
+        conn.close()
+
+    plano = {"excluir": [], "atualizar": [], "sem_mudanca": 0, "ignorados": []}
+
+    def _limpo(v):
+        return None if pd.isna(v) else v
+
+    def _norm(v):
+        return "" if v is None else str(v).strip()
+
+    campos_comparar = ["nr_cras", "data", "turno", "medico", "matricula", "nome_usuario",
+                        "assistido", "servidor", "consulta", "status"]
+
+    for _, linha in df.iterrows():
+        if pd.isna(linha.get("id")):
+            continue
+        ficha_id = int(linha["id"])
+        atual = atuais.get(ficha_id)
+        if atual is None:
+            plano["ignorados"].append({"id": ficha_id, "motivo": "não encontrado no banco"})
+            continue
+
+        status_planilha = _norm(linha.get("status"))
+        if status_planilha.upper() == "EXCLUIR":
+            plano["excluir"].append(atual)
+            continue
+        if not status_planilha:
+            plano["ignorados"].append({"id": ficha_id, "motivo": "status em branco na planilha"})
+            continue
+
+        data_nova = linha.get("data")
+        if hasattr(data_nova, "date"):
+            data_nova = data_nova.date().isoformat()
+        elif isinstance(data_nova, str) and data_nova:
+            data_nova = data_nova[:10]
+        else:
+            data_nova = atual["data"]
+
+        novos = {
+            "nr_cras": _limpo(linha.get("nr_cras")),
+            "data": data_nova,
+            "turno": _limpo(linha.get("turno")) or "",
+            "medico": _limpo(linha.get("medico")) or atual["medico"],
+            "matricula": _limpo(linha.get("matricula")),
+            "nome_usuario": _limpo(linha.get("nome_usuario")),
+            "assistido": _limpo(linha.get("assistido")) or "Não",
+            "servidor": _limpo(linha.get("servidor")) or "Não",
+            "consulta": _limpo(linha.get("consulta")),
+            "status": status_planilha,
+        }
+
+        mudou = any(_norm(atual.get(c)) != _norm(novos.get(c)) for c in campos_comparar)
+        if mudou:
+            plano["atualizar"].append({"id": ficha_id, "antes": atual, "depois": novos})
+        else:
+            plano["sem_mudanca"] += 1
+
+    return plano
+
+
+def aplicar_sincronizacao_ficha(plano):
+    """
+    Aplica um plano gerado por analisar_planilha_ficha(): exclui e atualiza
+    os registros marcados, reconciliando os totais da tabela 'base' pra
+    cada mudança (categoria, status, tipo de consulta, ou até médico/data).
+    """
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        medicos_cache = {m["nome"]: dict(m) for m in cur.execute("SELECT * FROM medicos").fetchall()}
+
+        for row in plano["excluir"]:
+            _reverter_contribuicao_base(cur, row)
+            cur.execute("DELETE FROM ficha WHERE id = ?", (row["id"],))
+
+        for item in plano["atualizar"]:
+            _reverter_contribuicao_base(cur, item["antes"])
+            novos = item["depois"]
+            data_obj = date.fromisoformat(novos["data"])
+            cur.execute("""
+                UPDATE ficha SET nr_cras=?, data=?, mes=?, dia_semana=?, turno=?, medico=?,
+                                  matricula=?, nome_usuario=?, assistido=?, servidor=?,
+                                  consulta=?, status=?
+                WHERE id=?
+            """, (
+                novos["nr_cras"], novos["data"], nome_mes(data_obj), nome_dia(data_obj),
+                novos["turno"], novos["medico"], novos["matricula"], novos["nome_usuario"],
+                novos["assistido"], novos["servidor"], novos["consulta"], novos["status"],
+                item["id"]
+            ))
+            _aplicar_contribuicao_base(cur, novos, medicos_cache)
+
+        conn.commit()
+    finally:
+        conn.close()
+    _limpar_cache()
+    return {"excluidos": len(plano["excluir"]), "atualizados": len(plano["atualizar"])}
+
+
 def forcar_reseed_base():
     """Recarrega o histórico manualmente, só se a tabela 'base' estiver vazia
     (evita duplicar registros se já tiver dados). Usado pelo botão de
