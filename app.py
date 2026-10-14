@@ -464,10 +464,10 @@ elif pagina == "🖨️ Mapa de Atendimento":
         assistidos = sum(1 for a in atendimentos if a["assistido"] == "Sim" and a["servidor"] != "Sim")
         col_b.metric("Servidores", servidores)
         col_c.metric("Discentes assistidos", assistidos)
-
+        
         pdf_buffer = gerar_pdf_mapa(medico_sel, especialidade, data_sel, turno_sel,
-                                     atendimentos, total_faltosos=n_faltas,
-                                     chefe_setor=chefe_setor)
+                             atendimentos, total_faltosos=n_faltas)
+        
         st.download_button(
             "🖨️ Baixar Mapa em PDF", data=pdf_buffer,
             file_name=f"Mapa_{medico_sel}_{data_sel.strftime('%d-%m-%Y')}.pdf",
