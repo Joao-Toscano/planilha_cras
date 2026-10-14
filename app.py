@@ -427,14 +427,6 @@ elif pagina == "🖨️ Mapa de Atendimento":
     with col3:
         turno_sel = st.selectbox("Turno", ["Ambos", "MANHÃ", "TARDE"])
 
-    chefe_setor = st.text_input(
-        "Nome do Chefe de Setor (para a assinatura no PDF)",
-        value=db.get_config("chefe_setor", ""),
-        help="Fica salvo para os próximos mapas gerados.",
-    )
-    if chefe_setor != db.get_config("chefe_setor", ""):
-        db.set_config("chefe_setor", chefe_setor)
-
     # Sempre busca na hora, direto do banco — sem guardar em cache entre
     # páginas, para nunca mostrar um resultado desatualizado depois de
     # alguém mudar um status na página de Lançamento Diário.
@@ -861,16 +853,6 @@ elif pagina == "📁 Base de Dados":
                 else:
                     db.set_config("senha_recepcao", nova_recepcao)
                     st.success("Senha da Recepção atualizada.")
-
-        st.divider()
-        st.subheader("Nome do Chefe de Setor")
-        st.caption("Usado na assinatura do Mapa de Atendimento em PDF (também editável na "
-                   "página 'Mapa de Atendimento').")
-        chefe_config = st.text_input("Nome", value=db.get_config("chefe_setor", ""),
-                                      key="chefe_setor_config")
-        if chefe_config != db.get_config("chefe_setor", ""):
-            db.set_config("chefe_setor", chefe_config)
-            st.success("Salvo.")
 
     with aba[4]:
         st.caption("Use esta aba se os gráficos ou a lista de médicos aparecerem vazios.")
