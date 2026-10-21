@@ -32,6 +32,9 @@ def _categoria_atendimento(row):
         return "Discente"
 
 
+LINHAS_TOTAIS = 18  # linhas numeradas em sequência (antes 12 + bloco de Projeto com 6)
+
+
 def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
                     total_faltosos=0, chefe_setor=""):
     buffer = BytesIO()
@@ -96,7 +99,7 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
         Paragraph("ASSINATURA DO USUÁRIO", header_style),
     ]]
 
-    for i, a in enumerate(atendimentos[:12], start=1):
+    for i, a in enumerate(atendimentos[:LINHAS_TOTAIS], start=1):
         cod = CODIGO_CONSULTA.get(a.get("consulta"), "")
         dados.append([
             Paragraph(str(i), cell_center), Paragraph(a.get("nr_cras") or "", cell_center),
@@ -105,12 +108,8 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
             Paragraph(cod, cell_center),
             Paragraph(_categoria_atendimento(a), cell_style), "",
         ])
-    for i in range(len(atendimentos) + 1, 13):
+    for i in range(len(atendimentos) + 1, LINHAS_TOTAIS + 1):
         dados.append([Paragraph(str(i), cell_center), "", "", "", "", "", ""])
-    # 1 linha em branco sem numeração (espaço extra, igual ao modelo original)
-    for _ in range(1):
-        dados.append(["", "", "", "", "", "", ""])
-
     t = Table(dados, colWidths=col_widths, repeatRows=1)
     t.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#00622F")),
@@ -121,31 +120,8 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
     ]))
     elementos.append(t)
 
-    # --- Linha "Projeto: Pesquisa ( ) Extensão ( )   Título do Projeto:" ---
     projeto_style = ParagraphStyle("projeto", parent=styles["Normal"], fontName="Helvetica-Bold",
                                     fontSize=8)
-    t_projeto = Table(
-        [[Paragraph("Projeto: Pesquisa ( )  Extensão ( )     Título do Projeto:", projeto_style)]],
-        colWidths=[sum(col_widths)])
-    t_projeto.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("TOPPADDING", (0, 0), (-1, -1), 1),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
-    ]))
-    elementos.append(t_projeto)
-
-    # --- 6 linhas para Pesquisa/Extensão (em branco, preenchimento manual) ---
-    dados_proj = []
-    for i in range(1, 7):
-        dados_proj.append([Paragraph(str(i), cell_center), "", "", "", "", "", ""])
-    t_proj_tbl = Table(dados_proj, colWidths=col_widths)
-    t_proj_tbl.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 1),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
-    ]))
-    elementos.append(t_proj_tbl)
 
     # --- Linha de resumo (contadores) ---
     servidores = sum(1 for a in atendimentos if a["servidor"] == "Sim")
