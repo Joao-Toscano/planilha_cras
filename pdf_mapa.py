@@ -136,8 +136,8 @@ def gerar_pdf_mapa(medico, especialidade, data_sel, turno, atendimentos,
     resumo_txt = (
         f"Servidor: {servidores}&nbsp;&nbsp;&nbsp;Discente: {discentes}&nbsp;&nbsp;&nbsp;"
         f"Discente assistido pela Prape: {disc_assistido}&nbsp;&nbsp;&nbsp;"
-        f"Pesquisa/Extensão: 0&nbsp;&nbsp;&nbsp;Consulta: {primeira}&nbsp;&nbsp;&nbsp;"
-        f"Retorno: {retorno}&nbsp;&nbsp;&nbsp;tratamento: {tratamento}&nbsp;&nbsp;&nbsp;"
+        f"Consulta: {primeira}&nbsp;&nbsp;&nbsp;"
+        f"Retorno: {retorno}&nbsp;&nbsp;&nbsp;Tratamento: {tratamento}&nbsp;&nbsp;&nbsp;"
         f"Faltosos: {total_faltosos}"
     )
     t_resumo = Table([[Paragraph(resumo_txt, projeto_style)]], colWidths=[sum(col_widths)])
